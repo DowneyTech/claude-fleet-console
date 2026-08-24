@@ -1,0 +1,26 @@
+services:
+  claude-project-a:
+    build: .
+    container_name: claude-project-a
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    volumes:
+      - claude-project-a-config:/home/claude/.claude
+      - ${HOME}/project-a-config:/workspace
+      - ${HOME}/Project:/vault
+
+  claude-project-b:
+    build: .
+    container_name: claude-project-b
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    volumes:
+      - claude-project-b-config:/home/claude/.claude
+      - ${HOME}/project-b:/workspace
+      - ${HOME}/Project:/vault
+
+volumes:
+  claude-project-a-config:
+  claude-project-b-config:
