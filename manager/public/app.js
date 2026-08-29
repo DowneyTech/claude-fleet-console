@@ -31,6 +31,13 @@ const STATE_LABEL = {
   missing: 'コンテナ未作成',
 };
 
+const ROLE_LABEL = {
+  design: '設計',
+  implement: '実装',
+  review: 'レビュー',
+  test: 'テスト',
+};
+
 // プロジェクトごとの「顔」。名前から決定的に選ぶので、再読み込みしても同じ担当が
 // 同じキャラのままになる（見た目でどのカードか覚えやすくするため）。
 const CHARACTERS = ['🐱', '🐶', '🦊', '🐼', '🐰', '🐻', '🐯', '🦁', '🐸', '🐵', '🦉', '🐧'];
@@ -55,6 +62,8 @@ async function apiCall(base, path, options) {
 
 const api = (path, options) => apiCall('/api/containers', path, options);
 const apiConfig = (path, options) => apiCall('/api/config', path, options);
+const apiPipeline = (path, options) => apiCall('/api/pipeline', path, options);
+const apiSkillTemplates = (path, options) => apiCall('/api/skill-templates', path, options);
 
 function ago(ts) {
   if (!ts) return '—';
@@ -74,6 +83,56 @@ function duration(ms) {
 
 function short(id) {
   return id ? id.slice(0, 8) : '—';
+}
+
+/**
+ * 省略表示されているパス欄をクリックで全文表示（折り返し）に切り替え、
+ * 同時にフルパスをクリップボードへコピーする。値が無い（'—'）ときは何もしない。
+ */
+function setupCopyablePath(dd) {
+  const hint = dd.nextElementSibling;
+
+  const activate = async () => {
+    const text = dd.dataset.fullText;
+    if (!text) return;
+    dd.classList.toggle('expanded');
+    try {
+      await navigator.clipboard.writeText(text);
+      if (hint) {
+        hint.classList.add('show');
+        clearTimeout(hint._copyTimer);
+        hint._copyTimer = setTimeout(() => hint.classList.remove('show'), 1400);
+      }
+    } catch {
+      // クリップボード API が使えない場合（権限拒否など）は全文表示の切り替えのみ行う。
+    }
+  };
+
+  dd.addEventListener('click', activate);
+  dd.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    activate();
+  });
+}
+
+/** パス欄にフルテキストを設定する。'—' 表示のときはコピー対象なしとして扱う。 */
+function setPathText(dd, path) {
+  dd.textContent = path || '—';
+  dd.title = path ? `${path}（クリックでコピー）` : '';
+  dd.dataset.fullText = path || '';
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0MB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return `${value.toFixed(i === 0 ? 0 : 1)}${units[i]}`;
 }
 
 /* ------------------------- gauges (context / limits) ------------------------- */
@@ -294,8 +353,10 @@ function renderEvent(event) {
 
   if (kind === 'start') {
     const mode = data.sessionMode === 'new' ? '新規セッション' : 'セッション継続';
+    const bits = [mode, short(data.sessionId)];
+    if (data.model) bits.push(data.model);
     const body = document.createElement('span');
-    body.textContent = `${mode} · ${short(data.sessionId)}`;
+    body.textContent = bits.join(' · ');
     const pre = document.createElement('pre');
     pre.textContent = data.prompt;
     body.appendChild(pre);
@@ -305,9 +366,11 @@ function renderEvent(event) {
   if (kind === 'stream') return renderStreamJson(data);
   if (kind === 'stderr') return row('stderr', data.text.trimEnd(), 'err');
   if (kind === 'raw') return row('raw', data.line, 'note');
+  if (kind === 'cancel') return row('停止', '停止を要求しました', 'note');
 
   if (kind === 'end') {
     if (data.error) return row('終了', `エラー: ${data.error}`, 'err');
+    if (data.cancelled) return row('終了', `キャンセルされました · ${duration(data.durationMs)}`, 'err');
     const ok = data.exitCode === 0;
     const label = ok ? '完了' : `終了コード ${data.exitCode}`;
     return row('終了', `${label} · ${duration(data.durationMs)}`, ok ? 'done' : 'err');
@@ -385,7 +448,7 @@ function openStream(name) {
     resetAnswer(card);
   });
 
-  for (const kind of ['start', 'stream', 'stderr', 'raw', 'end']) {
+  for (const kind of ['start', 'stream', 'stderr', 'raw', 'cancel', 'end']) {
     es.addEventListener(kind, (ev) => {
       card.els.streamStatus.textContent = '受信中';
       const event = JSON.parse(ev.data);
@@ -419,12 +482,16 @@ function createCard(name) {
     name: q('.card-name'),
     character: q('.character'),
     characterFace: q('.character-face'),
+    roleBadge: q('.role-badge'),
     pill: q('.pill'),
     pillText: q('.pill-text'),
     state: q('.m-state'),
     activity: q('.m-activity'),
     session: q('.m-session'),
+    model: q('.m-model'),
     auth: q('.m-auth'),
+    cpu: q('.m-cpu'),
+    mem: q('.m-mem'),
     workspace: q('.m-workspace'),
     vault: q('.m-vault'),
     gauges: q('.gauges'),
@@ -435,12 +502,16 @@ function createCard(name) {
     form: q('.composer'),
     textarea: q('.composer textarea'),
     newSession: q('.new-session'),
+    templateSelect: q('.template-select'),
+    modelSelect: q('.model-select'),
     send: q('.send'),
+    queueList: q('.queue-list'),
     answerWrap: q('.answer-wrap'),
     answer: q('.answer'),
     streamWrap: q('.stream-wrap'),
     stream: q('.stream'),
     streamStatus: q('.stream-status'),
+    cancel: q('.cancel'),
   };
 
   for (const button of els.actions) {
@@ -449,6 +520,7 @@ function createCard(name) {
       if (action === 'history') return openHistory(name, els.title.textContent);
       if (action === 'auth') return openAuth(name, els.title.textContent);
       if (action === 'skills') return openSkills(name, els.title.textContent);
+      if (action === 'diff') return openDiff(name, els.title.textContent);
       if (action === 'config') return openConfigForEdit(name, els.title.textContent);
 
       button.disabled = true;
@@ -468,6 +540,20 @@ function createCard(name) {
   // 顔は名前だけで決まるので、カード生成時に一度だけ書けばよい。
   els.characterFace.textContent = characterFor(name);
 
+  setupCopyablePath(els.workspace);
+  setupCopyablePath(els.vault);
+
+  // テンプレート一覧はカード生成時点の最新値で埋めておく（templates が未取得の
+  // 場合は空のまま。loadTemplates() 完了後に renderTemplateSelects() が埋め直す）。
+  fillTemplateOptions(els.templateSelect);
+  els.templateSelect.addEventListener('change', () => {
+    const t = templates.find((item) => item.id === els.templateSelect.value);
+    els.templateSelect.value = '';
+    if (!t) return;
+    els.textarea.value = t.prompt;
+    els.textarea.focus();
+  });
+
   els.form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const prompt = els.textarea.value.trim();
@@ -475,18 +561,35 @@ function createCard(name) {
 
     els.send.disabled = true;
     try {
-      await api(`/${encodeURIComponent(name)}/tasks`, {
+      const result = await api(`/${encodeURIComponent(name)}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, newSession: els.newSession.checked }),
+        body: JSON.stringify({
+          prompt,
+          newSession: els.newSession.checked,
+          model: els.modelSelect.value || undefined,
+        }),
       });
       els.textarea.value = '';
       els.newSession.checked = false;
-      openStream(name);
+      els.modelSelect.value = '';
+      // busy 中の投入はキューに積まれるだけなので、実行中タスクの購読は動かさない。
+      if (!result.queued) openStream(name);
       refresh();
     } catch (err) {
       window.alert(`送信に失敗しました: ${err.message}`);
+    } finally {
       els.send.disabled = false;
+    }
+  });
+
+  els.cancel.addEventListener('click', async () => {
+    els.cancel.disabled = true;
+    try {
+      await api(`/${encodeURIComponent(name)}/task`, { method: 'DELETE' });
+    } catch (err) {
+      window.alert(`停止に失敗しました: ${err.message}`);
+      els.cancel.disabled = false;
     }
   });
 
@@ -494,6 +597,38 @@ function createCard(name) {
   const card = { root, els };
   cards.set(name, card);
   return card;
+}
+
+/** busy なコンテナに積まれた、実行待ちタスクの一覧。 */
+function renderQueue(card, name, queue) {
+  const box = card.els.queueList;
+  box.hidden = queue.length === 0;
+  if (queue.length === 0) {
+    box.textContent = '';
+    return;
+  }
+
+  box.textContent = '';
+  box.appendChild(el('div', 'queue-title', `キュー待ち ${queue.length} 件`));
+
+  for (const item of queue) {
+    const row = el('div', 'queue-item');
+    const body = el('span', 'queue-body', item.prompt);
+    const cancelBtn = el('button', 'link-btn', '取消');
+    cancelBtn.type = 'button';
+    cancelBtn.addEventListener('click', async () => {
+      cancelBtn.disabled = true;
+      try {
+        await api(`/${encodeURIComponent(name)}/tasks/queue/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+        refresh();
+      } catch (err) {
+        window.alert(`取消に失敗しました: ${err.message}`);
+        cancelBtn.disabled = false;
+      }
+    });
+    row.append(body, cancelBtn);
+    box.appendChild(row);
+  }
 }
 
 function updateCard(data) {
@@ -507,19 +642,37 @@ function updateCard(data) {
   els.character.dataset.activity = data.activity;
   els.character.title = ACTIVITY_LABEL[data.activity] ?? data.activity;
 
+  if (data.role && ROLE_LABEL[data.role]) {
+    els.roleBadge.hidden = false;
+    els.roleBadge.textContent = ROLE_LABEL[data.role];
+    els.roleBadge.dataset.role = data.role;
+  } else {
+    els.roleBadge.hidden = true;
+  }
+
   els.state.textContent = STATE_LABEL[data.state] ?? data.state;
   els.activity.textContent = data.busy ? '実行中' : ago(data.lastActivity);
   els.session.textContent = short(data.task?.sessionId ?? data.latestSessionId);
   els.session.title = data.task?.sessionId ?? data.latestSessionId ?? '';
+  els.model.textContent = data.model || 'アカウント既定';
 
-  // 参照フォルダ（workspace / vault のマウント元）。docker inspect の実マウントに基づく
-  // ので、「今動いているコンテナが実際にどのホストフォルダを見ているか」を表す。
-  const wsMount = (data.mounts ?? []).find((m) => m.destination === data.workspacePath);
-  const vaultMount = (data.mounts ?? []).find((m) => m.destination === '/vault');
-  els.workspace.textContent = wsMount?.source ?? '—';
-  els.workspace.title = wsMount?.source ?? '';
-  els.vault.textContent = vaultMount?.source ?? '—';
-  els.vault.title = vaultMount?.source ?? '';
+  // 参照フォルダ（workspace / vault のマウント元）。docker-compose.yml の記述を
+  // 実際のホストパスへ展開した値なので、Finder やターミナルでそのまま開ける。
+  // 長いパスは省略表示されるが、クリックすると全文表示 + クリップボードコピーができる。
+  setPathText(els.workspace, data.hostPaths?.workspace);
+  setPathText(els.vault, data.hostPaths?.vault);
+
+  // CPU / メモリ使用量。起動中のコンテナのみ取得できる。
+  if (data.state === 'running' && data.resources) {
+    els.cpu.textContent = `${data.resources.cpuPercent.toFixed(1)}%`;
+    const mem = `${formatBytes(data.resources.memUsedBytes)} / ${formatBytes(data.resources.memLimitBytes)}`;
+    els.mem.textContent = `${mem} (${data.resources.memPercent.toFixed(1)}%)`;
+    els.mem.title = mem;
+  } else {
+    els.cpu.textContent = '—';
+    els.mem.textContent = '—';
+    els.mem.title = '';
+  }
 
   const running = data.state === 'running';
   const loggedIn = Boolean(data.auth?.loggedIn);
@@ -538,18 +691,26 @@ function updateCard(data) {
     const action = button.dataset.action;
     if (action === 'start') button.disabled = running || data.state === 'missing';
     else if (action === 'stop' || action === 'restart') button.disabled = !running;
-    else if (action === 'history' || action === 'auth' || action === 'skills') button.disabled = !running;
+    else if (action === 'history' || action === 'auth' || action === 'skills' || action === 'diff') button.disabled = !running;
     // 'config' はコンテナの起動状態に関係なく常に操作可能（ファイル編集のみのため）。
   }
 
   const canSend = running && loggedIn;
-  els.send.disabled = !canSend || data.busy;
+  // busy 中でも送信は許可する（自動でキューに積まれる）。ボタンの文言だけ変える。
+  els.send.disabled = !canSend;
+  els.send.textContent = data.busy ? 'キューに追加' : '送信';
   els.textarea.disabled = !canSend;
   els.textarea.placeholder = !running
     ? 'コンテナを起動すると指示を出せます'
     : !loggedIn
       ? 'ログインすると指示を出せます'
       : 'このコンテナの Claude に指示を出す…';
+
+  els.cancel.hidden = !data.busy;
+  els.cancel.disabled = Boolean(data.task?.cancelRequested);
+  els.cancel.textContent = data.task?.cancelRequested ? '停止処理中…' : '停止';
+
+  renderQueue(card, data.name, data.queue ?? []);
 
   // 実行中なのに未購読なら（ページ再読み込み後など）、途中から追いかける。
   if (data.busy && !streams.has(data.name)) openStream(data.name);
@@ -849,6 +1010,8 @@ async function openHistory(name, displayName) {
 
   const buttons = [];
   for (const session of payload.sessions) {
+    const row = el('div', 'session-row');
+
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'session-btn';
@@ -876,11 +1039,91 @@ async function openHistory(name, displayName) {
       }
     });
 
+    // 次にこのコンテナへタスクを投入したとき、最新セッションではなくこの
+    // セッションから --resume させたい場合に使う（最新でないセッションを
+    // 手動で選び直すための唯一の手段）。
+    const resumeBtn = document.createElement('button');
+    resumeBtn.type = 'button';
+    resumeBtn.className = 'link-btn resume-btn';
+    resumeBtn.textContent = 'ここから再開';
+    resumeBtn.addEventListener('click', async () => {
+      resumeBtn.disabled = true;
+      try {
+        await api(`/${encodeURIComponent(name)}/sessions/${session.id}/resume`, { method: 'POST' });
+        resumeBtn.textContent = '設定しました';
+        setTimeout(() => {
+          resumeBtn.textContent = 'ここから再開';
+          resumeBtn.disabled = false;
+        }, 2000);
+      } catch (err) {
+        window.alert(`再開の設定に失敗しました: ${err.message}`);
+        resumeBtn.disabled = false;
+      }
+    });
+
+    row.append(button, resumeBtn);
     buttons.push(button);
-    historyList.appendChild(button);
+    historyList.appendChild(row);
   }
 
   buttons[0].click();
+}
+
+/* ---------------------------- diff rendering ---------------------------- */
+
+/**
+ * unified diff テキストを行単位に色分けした <pre> にする。
+ * レビュー工程（Skills / パイプライン成果物）と、カードの「差分」ボタンの
+ * 両方から共有で使う。
+ */
+function renderDiffText(text) {
+  const pre = el('pre', 'diff-view');
+  if (!text) {
+    pre.appendChild(el('span', 'diff-line', '（差分はありません）'));
+    return pre;
+  }
+  for (const line of text.split('\n')) {
+    const span = document.createElement('span');
+    span.className = 'diff-line';
+    if (line.startsWith('+++') || line.startsWith('---')) span.classList.add('diff-file');
+    else if (line.startsWith('@@')) span.classList.add('diff-hunk');
+    else if (line.startsWith('+')) span.classList.add('diff-add');
+    else if (line.startsWith('-')) span.classList.add('diff-del');
+    span.textContent = line;
+    pre.append(span, document.createTextNode('\n'));
+  }
+  return pre;
+}
+
+const diffDialog = document.getElementById('diff-dialog');
+const diffTitle = document.getElementById('diff-title');
+const diffBody = document.getElementById('diff-body');
+
+document.getElementById('diff-close').addEventListener('click', () => diffDialog.close());
+
+async function openDiff(name, displayName) {
+  diffTitle.textContent = `${displayName} — 差分（workspace の git diff）`;
+  diffBody.textContent = '';
+  diffBody.appendChild(el('p', 'hint', '読み込み中…'));
+  diffDialog.showModal();
+
+  try {
+    const data = await api(`/${encodeURIComponent(name)}/diff`);
+    diffBody.textContent = '';
+    if (!data.isRepo) {
+      diffBody.appendChild(el('p', 'hint', data.message || 'このプロジェクトは git リポジトリではありません。'));
+      return;
+    }
+    if (!data.diff) {
+      diffBody.appendChild(el('p', 'hint', '未コミットの変更はありません。'));
+      return;
+    }
+    if (data.stat) diffBody.appendChild(el('pre', 'diff-stat', data.stat));
+    diffBody.appendChild(renderDiffText(data.diff));
+  } catch (err) {
+    diffBody.textContent = '';
+    diffBody.appendChild(el('p', 'hint', `取得に失敗しました: ${err.message}`));
+  }
 }
 
 /* -------------------------------- skills -------------------------------- */
@@ -936,20 +1179,77 @@ function renderSkills(skills) {
   }
 }
 
-async function openSkills(name, displayName) {
-  skillsTitle.textContent = `${displayName} — Skills`;
+let skillsTarget = null;
+
+async function refreshSkillsList() {
   skillsBody.textContent = '';
   skillsBody.appendChild(el('p', 'hint', '読み込み中…'));
-  skillsDialog.showModal();
-
   try {
-    const { skills } = await api(`/${encodeURIComponent(name)}/skills`);
+    const { skills } = await api(`/${encodeURIComponent(skillsTarget)}/skills`);
     renderSkills(skills);
   } catch (err) {
     skillsBody.textContent = '';
     skillsBody.appendChild(el('p', 'hint', `取得に失敗しました: ${err.message}`));
   }
 }
+
+async function openSkills(name, displayName) {
+  skillsTarget = name;
+  skillsTitle.textContent = `${displayName} — Skills`;
+  await refreshSkillsList();
+  skillsDialog.showModal();
+}
+
+/* --------------------------- skill 作成フォーム --------------------------- */
+
+const skillForm = document.getElementById('skill-form');
+const skillRoleSelect = document.getElementById('skill-role-select');
+
+let skillRoleTemplates = {};
+
+async function loadSkillRoleTemplates() {
+  try {
+    const data = await apiSkillTemplates('/');
+    skillRoleTemplates = data.templates ?? {};
+  } catch {
+    skillRoleTemplates = {};
+  }
+  for (const [role, tpl] of Object.entries(skillRoleTemplates)) {
+    skillRoleSelect.appendChild(new Option(tpl.title, role));
+  }
+}
+loadSkillRoleTemplates();
+
+skillRoleSelect.addEventListener('change', () => {
+  const tpl = skillRoleTemplates[skillRoleSelect.value];
+  if (!tpl) return;
+  skillForm.elements.slug.value = tpl.slug;
+  skillForm.elements.content.value = tpl.content;
+});
+
+skillForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!skillsTarget) return;
+  const fd = new FormData(skillForm);
+  const slug = String(fd.get('slug') ?? '').trim();
+  const content = String(fd.get('content') ?? '');
+  if (!slug || !content.trim()) return;
+
+  const submitBtn = skillForm.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    await api(`/${encodeURIComponent(skillsTarget)}/skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug, content }),
+    });
+    await refreshSkillsList();
+  } catch (err) {
+    window.alert(`保存に失敗しました: ${err.message}`);
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
 
 /* ---------------------------- container config ---------------------------- */
 
@@ -967,6 +1267,24 @@ let configMode = 'add'; // 'add' | 'edit'
 let configTarget = null; // 編集対象のサービス名（add モードでは null）
 
 document.getElementById('config-close').addEventListener('click', () => configDialog.close());
+
+// 役割（設計/実装/レビュー/テスト）ごとの permissionMode / allowedTools のおすすめ値。
+// 「プリセットを適用」ボタンから、保存前のフォーム値としてのみ差し込む。
+let rolePresets = {};
+apiConfig('/role-presets')
+  .then((data) => { rolePresets = data.presets ?? {}; })
+  .catch(() => { rolePresets = {}; });
+
+document.getElementById('config-apply-role-preset').addEventListener('click', () => {
+  const role = configForm.elements.role.value;
+  const preset = rolePresets[role];
+  if (!preset) {
+    window.alert('先に役割を選択してください。');
+    return;
+  }
+  configForm.elements.permissionMode.value = preset.permissionMode;
+  configForm.elements.allowedTools.value = (preset.allowedTools ?? []).join(', ');
+});
 
 function resetConfigLog() {
   configLog.hidden = true;
@@ -1005,9 +1323,11 @@ async function openConfigForEdit(name, displayName) {
 
     configForm.elements.displayName.value = project.displayName ?? '';
     configForm.elements.hostPath.value = project.hostWorkspacePath ?? '';
+    configForm.elements.role.value = project.role ?? '';
     configForm.elements.permissionMode.value = project.permissionMode ?? 'bypassPermissions';
     configForm.elements.allowedTools.value = (project.allowedTools ?? []).join(', ');
-    configVault.textContent = project.hostVaultPath ?? '—';
+    configForm.elements.model.value = project.model ?? '';
+    configVault.textContent = project.hostVaultPathResolved ?? project.hostVaultPath ?? '—';
   } catch (err) {
     configVault.textContent = '—';
     window.alert(`設定の取得に失敗しました: ${err.message}`);
@@ -1025,8 +1345,10 @@ configForm.addEventListener('submit', async (event) => {
   const payload = {
     displayName: fd.get('displayName'),
     hostPath: fd.get('hostPath'),
+    role: fd.get('role') || '',
     permissionMode: fd.get('permissionMode'),
     allowedTools,
+    model: fd.get('model'),
   };
 
   configSave.disabled = true;
@@ -1085,6 +1407,382 @@ configApplyBtn.addEventListener('click', async () => {
 });
 
 document.getElementById('add-project').addEventListener('click', openConfigForAdd);
+
+/* ------------------------------- templates ------------------------------- */
+
+// よく使う指示を、コンテナ横断で使い回せるテンプレートとして保存する。
+// manager プロセスのメモリではなくファイル（manager/templates.json）に永続化される。
+const apiTemplates = (path, options) => apiCall('/api/templates', path, options);
+
+let templates = [];
+
+/** 1 つの <select> にテンプレート一覧を（プレースホルダ以外を作り直して）反映する。 */
+function fillTemplateOptions(select) {
+  const current = select.value;
+  select.textContent = '';
+  select.appendChild(new Option('テンプレートを挿入…', ''));
+  for (const t of templates) select.appendChild(new Option(t.title, t.id));
+  select.value = templates.some((t) => t.id === current) ? current : '';
+}
+
+/** 全カードのテンプレート選択肢を最新の templates で作り直す。 */
+function renderTemplateSelects() {
+  for (const card of cards.values()) fillTemplateOptions(card.els.templateSelect);
+}
+
+async function loadTemplates() {
+  try {
+    const data = await apiTemplates('/');
+    templates = data.templates ?? [];
+  } catch {
+    templates = [];
+  }
+  renderTemplateSelects();
+}
+
+const templatesDialog = document.getElementById('templates-dialog');
+const templateForm = document.getElementById('template-form');
+const templateListEl = document.getElementById('template-list');
+
+function renderTemplateList() {
+  templateListEl.textContent = '';
+
+  if (templates.length === 0) {
+    templateListEl.appendChild(el('li', 'hint', 'まだテンプレートがありません。'));
+    return;
+  }
+
+  for (const t of templates) {
+    const item = el('li', 'template-item');
+
+    const head = el('div', 'template-item-head');
+    head.appendChild(el('span', 'template-item-title', t.title));
+
+    const del = el('button', 'link-btn', '削除');
+    del.type = 'button';
+    del.addEventListener('click', async () => {
+      del.disabled = true;
+      try {
+        await apiTemplates(`/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
+        await loadTemplates();
+        renderTemplateList();
+      } catch (err) {
+        window.alert(`削除に失敗しました: ${err.message}`);
+        del.disabled = false;
+      }
+    });
+    head.appendChild(del);
+
+    item.append(head, el('pre', 'template-item-body', t.prompt));
+    templateListEl.appendChild(item);
+  }
+}
+
+document.getElementById('templates-close').addEventListener('click', () => templatesDialog.close());
+document.getElementById('open-templates').addEventListener('click', () => {
+  renderTemplateList();
+  templatesDialog.showModal();
+});
+
+templateForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const fd = new FormData(templateForm);
+  const title = String(fd.get('title') ?? '').trim();
+  const prompt = String(fd.get('prompt') ?? '').trim();
+  if (!title || !prompt) return;
+
+  const submitBtn = templateForm.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    await apiTemplates('/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, prompt }),
+    });
+    templateForm.reset();
+    await loadTemplates();
+    renderTemplateList();
+  } catch (err) {
+    window.alert(`保存に失敗しました: ${err.message}`);
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
+
+loadTemplates();
+
+/* -------------------------------- pipeline -------------------------------- */
+
+// 設計 → 実装 → レビュー → テスト → 完了、というチケットのかんばん。
+// 「どの工程を誰が担当するか」はサーバ側（containers.config.json の role）が
+// 権威を持つので、ここでは /api/pipeline/stages が返す順序・担当者をそのまま使う。
+
+const pipelineDialog = document.getElementById('pipeline-dialog');
+const pipelineNewForm = document.getElementById('pipeline-new-form');
+const pipelineBoard = document.getElementById('pipeline-board');
+const pipelineDetail = document.getElementById('pipeline-detail');
+
+document.getElementById('pipeline-close').addEventListener('click', () => pipelineDialog.close());
+document.getElementById('open-pipeline').addEventListener('click', () => {
+  pipelineDialog.showModal();
+  loadPipeline();
+});
+
+let pipelineStages = [];
+let pipelineTickets = [];
+let pipelineSelected = null;
+
+function stageInfo(stage) {
+  return pipelineStages.find((s) => s.stage === stage) ?? { stage, label: stage, project: null, displayName: null };
+}
+
+async function loadPipeline() {
+  try {
+    const [stagesData, ticketsData] = await Promise.all([apiPipeline('/stages'), apiPipeline('/tickets')]);
+    pipelineStages = stagesData.stages ?? [];
+    pipelineTickets = ticketsData.tickets ?? [];
+  } catch (err) {
+    pipelineBoard.textContent = '';
+    pipelineBoard.appendChild(el('p', 'hint', `取得に失敗しました: ${err.message}`));
+    return;
+  }
+
+  renderPipelineBoard();
+  if (pipelineSelected && pipelineTickets.some((t) => t.id === pipelineSelected)) {
+    renderPipelineDetail(pipelineSelected);
+  } else {
+    pipelineSelected = null;
+    pipelineDetail.hidden = true;
+  }
+}
+
+function renderPipelineBoard() {
+  pipelineBoard.textContent = '';
+  for (const stage of pipelineStages) {
+    const col = el('div', 'pipeline-col');
+    const head = el('div', 'pipeline-col-head');
+    head.appendChild(el('span', 'pipeline-col-label', stage.label));
+    head.appendChild(el('span', 'pipeline-col-project', stage.displayName || '担当未設定'));
+    col.appendChild(head);
+
+    const list = el('div', 'pipeline-col-list');
+    const tickets = pipelineTickets.filter((t) => t.stage === stage.stage);
+    for (const ticket of tickets) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'pipeline-ticket';
+      if (ticket.id === pipelineSelected) card.classList.add('is-selected');
+      card.appendChild(el('div', 'pipeline-ticket-title', ticket.title));
+      card.appendChild(el('div', 'pipeline-ticket-meta', ago(ticket.updatedAt)));
+      card.addEventListener('click', () => {
+        pipelineSelected = ticket.id;
+        renderPipelineBoard();
+        renderPipelineDetail(ticket.id);
+      });
+      list.appendChild(card);
+    }
+    if (tickets.length === 0) list.appendChild(el('p', 'hint', '案件なし'));
+    col.appendChild(list);
+    pipelineBoard.appendChild(col);
+  }
+}
+
+const HISTORY_KIND_LABEL = { created: '作成', sent: '送信', advanced: '工程を進めた', rejected: '差し戻し' };
+
+function renderPipelineArtifact(name, content) {
+  if (/\.(diff|patch)$/i.test(name)) return renderDiffText(content);
+  return markdownBlock(content);
+}
+
+async function renderPipelineDetail(id) {
+  const ticket = pipelineTickets.find((t) => t.id === id);
+  if (!ticket) return;
+
+  pipelineDetail.hidden = false;
+  pipelineDetail.textContent = '';
+
+  const order = pipelineStages.map((s) => s.stage);
+  const idx = order.indexOf(ticket.stage);
+  const nextStage = order[idx + 1];
+  const currentInfo = stageInfo(ticket.stage);
+
+  const head = el('div', 'pipeline-detail-head');
+  head.appendChild(el('h4', null, ticket.title));
+  const del = el('button', 'link-btn', '削除');
+  del.type = 'button';
+  del.addEventListener('click', async () => {
+    if (!window.confirm(`「${ticket.title}」を削除しますか？（/handoff 内の成果物ファイルは残ります）`)) return;
+    try {
+      await apiPipeline(`/tickets/${encodeURIComponent(ticket.id)}`, { method: 'DELETE' });
+      pipelineSelected = null;
+      await loadPipeline();
+    } catch (err) {
+      window.alert(`削除に失敗しました: ${err.message}`);
+    }
+  });
+  head.appendChild(del);
+  pipelineDetail.appendChild(head);
+
+  pipelineDetail.appendChild(
+    el(
+      'p',
+      'pipeline-detail-meta',
+      `現在: ${currentInfo.label}${currentInfo.displayName ? `（担当: ${currentInfo.displayName}）` : '（担当プロジェクト未設定）'}`,
+    ),
+  );
+
+  const noteInput = document.createElement('textarea');
+  noteInput.className = 'pipeline-note';
+  noteInput.rows = 2;
+  noteInput.placeholder = '引き継ぎメモ（任意）';
+  pipelineDetail.appendChild(noteInput);
+
+  const actions = el('div', 'pipeline-detail-actions');
+
+  const sendBtn = document.createElement('button');
+  sendBtn.type = 'button';
+  sendBtn.textContent = `${currentInfo.label}へ(再)送信`;
+  sendBtn.addEventListener('click', async () => {
+    sendBtn.disabled = true;
+    try {
+      await apiPipeline(`/tickets/${encodeURIComponent(ticket.id)}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: noteInput.value.trim() || undefined }),
+      });
+      await loadPipeline();
+    } catch (err) {
+      window.alert(`送信に失敗しました: ${err.message}`);
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+  actions.appendChild(sendBtn);
+
+  if (nextStage) {
+    const advanceBtn = document.createElement('button');
+    advanceBtn.type = 'button';
+    advanceBtn.className = 'send';
+    advanceBtn.textContent = `次の工程へ（${stageInfo(nextStage).label}）`;
+    advanceBtn.addEventListener('click', async () => {
+      advanceBtn.disabled = true;
+      try {
+        await apiPipeline(`/tickets/${encodeURIComponent(ticket.id)}/advance`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note: noteInput.value.trim() || undefined }),
+        });
+        await loadPipeline();
+      } catch (err) {
+        window.alert(`送信に失敗しました: ${err.message}`);
+      } finally {
+        advanceBtn.disabled = false;
+      }
+    });
+    actions.appendChild(advanceBtn);
+  }
+
+  if (idx > 0) {
+    const rejectSelect = document.createElement('select');
+    for (let i = 0; i < idx; i += 1) {
+      const s = order[i];
+      rejectSelect.appendChild(new Option(`${stageInfo(s).label}へ差し戻す`, s));
+    }
+    const rejectBtn = document.createElement('button');
+    rejectBtn.type = 'button';
+    rejectBtn.className = 'ghost';
+    rejectBtn.textContent = '差し戻す';
+    rejectBtn.addEventListener('click', async () => {
+      rejectBtn.disabled = true;
+      try {
+        await apiPipeline(`/tickets/${encodeURIComponent(ticket.id)}/reject`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ toStage: rejectSelect.value, note: noteInput.value.trim() || undefined }),
+        });
+        await loadPipeline();
+      } catch (err) {
+        window.alert(`差し戻しに失敗しました: ${err.message}`);
+      } finally {
+        rejectBtn.disabled = false;
+      }
+    });
+    actions.append(rejectSelect, rejectBtn);
+  }
+
+  pipelineDetail.appendChild(actions);
+
+  const historyBox = el('div', 'pipeline-history');
+  historyBox.appendChild(el('div', 'pipeline-subhead', '履歴'));
+  for (const h of [...ticket.history].reverse()) {
+    const row = el('div', 'pipeline-history-row');
+    const label = HISTORY_KIND_LABEL[h.kind] ?? h.kind;
+    row.appendChild(el('span', 'mono', new Date(h.at).toLocaleString('ja-JP')));
+    row.appendChild(el('span', null, ` ${label} → ${stageInfo(h.stage).label}${h.project ? `（${h.project}）` : ''}`));
+    if (h.note) row.appendChild(el('div', 'pipeline-history-note', h.note));
+    historyBox.appendChild(row);
+  }
+  pipelineDetail.appendChild(historyBox);
+
+  const artifactsBox = el('div', 'pipeline-artifacts');
+  artifactsBox.appendChild(el('div', 'pipeline-subhead', '成果物（/handoff）'));
+  const artifactsList = el('div', 'pipeline-artifacts-list');
+  const artifactsView = el('div', 'pipeline-artifacts-view');
+  artifactsBox.append(artifactsList, artifactsView);
+  pipelineDetail.appendChild(artifactsBox);
+
+  try {
+    const { artifacts } = await apiPipeline(`/tickets/${encodeURIComponent(ticket.id)}/artifacts`);
+    if (artifacts.length === 0) {
+      artifactsList.appendChild(el('p', 'hint', 'まだありません。'));
+    }
+    for (const a of artifacts) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'link-btn';
+      btn.textContent = a.name;
+      btn.addEventListener('click', async () => {
+        artifactsView.textContent = '読み込み中…';
+        try {
+          const { content } = await apiPipeline(
+            `/tickets/${encodeURIComponent(ticket.id)}/artifacts/${encodeURIComponent(a.name)}`,
+          );
+          artifactsView.textContent = '';
+          artifactsView.appendChild(renderPipelineArtifact(a.name, content));
+        } catch (err) {
+          artifactsView.textContent = `読み込みに失敗しました: ${err.message}`;
+        }
+      });
+      artifactsList.appendChild(btn);
+    }
+  } catch {
+    artifactsList.appendChild(el('p', 'hint', '取得に失敗しました。'));
+  }
+}
+
+pipelineNewForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const fd = new FormData(pipelineNewForm);
+  const title = String(fd.get('title') ?? '').trim();
+  if (!title) return;
+
+  const submitBtn = pipelineNewForm.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  try {
+    const ticket = await apiPipeline('/tickets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    pipelineNewForm.reset();
+    pipelineSelected = ticket.id;
+    await loadPipeline();
+  } catch (err) {
+    window.alert(`追加に失敗しました: ${err.message}`);
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
 
 /* -------------------------------- polling -------------------------------- */
 

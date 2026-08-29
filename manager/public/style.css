@@ -260,7 +260,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible {
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
-.meta div { min-width: 0; }
+.meta div { min-width: 0; position: relative; }
 .meta dt {
   font-size: 10.5px;
   letter-spacing: 0.06em;
@@ -274,6 +274,32 @@ button:focus-visible, textarea:focus-visible, input:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* クリックで全文表示（折り返し）に切り替え、同時にクリップボードへコピーする項目。 */
+.meta dd.copyable { cursor: pointer; }
+.meta dd.copyable:hover { color: var(--accent); }
+.meta dd.copyable.expanded {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-all;
+}
+.copy-hint {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  transform: translateY(-100%);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.copy-hint.show { opacity: 1; }
 
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .actions .ghost { margin-left: auto; background: transparent; }
@@ -390,6 +416,16 @@ button:focus-visible, textarea:focus-visible, input:focus-visible {
   color: var(--text-dim);
   cursor: pointer;
 }
+.model-select, .template-select {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 4px 6px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.template-select { max-width: 140px; }
 .send {
   background: var(--accent);
   border-color: var(--accent);
@@ -397,7 +433,37 @@ button:focus-visible, textarea:focus-visible, input:focus-visible {
   font-weight: 600;
 }
 @media (prefers-color-scheme: dark) {
-  .send { color: #06201a; }
+  .send, .copy-hint { color: #06201a; }
+}
+
+/* ---------- queue ---------- */
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.queue-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.queue-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.queue-body {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- answer（直近の回答のみ） ---------- */
@@ -443,6 +509,13 @@ button:focus-visible, textarea:focus-visible, input:focus-visible {
   font-size: 12px;
 }
 .stream-status { color: var(--text-dim); font-family: var(--mono); font-size: 11px; }
+.stream-head .cancel {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+  font-size: 11px;
+  padding: 3px 9px;
+}
 .stream {
   max-height: 320px;
   overflow-y: auto;
@@ -667,6 +740,10 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 .session-btn .sid { font-family: var(--mono); font-size: 11px; display: block; }
 .session-btn .smeta { font-size: 11px; color: var(--text-dim); }
 
+.session-row { display: flex; align-items: center; gap: 6px; }
+.session-row .session-btn { flex: 1; min-width: 0; }
+.resume-btn { flex: none; font-size: 11px; white-space: nowrap; }
+
 .history-view { overflow-y: auto; padding: 16px 18px; }
 .hint { color: var(--text-dim); }
 
@@ -705,8 +782,6 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 
 .skills-body {
   padding: 16px 18px;
-  max-height: calc(84vh - 52px);
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -795,4 +870,205 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
   word-break: break-word;
   max-height: 220px;
   overflow-y: auto;
+}
+
+/* ---------- templates dialog ---------- */
+
+.templates-body {
+  padding: 16px 18px;
+  max-height: calc(84vh - 52px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.templates-body .config-form { padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.templates-body textarea {
+  font: inherit;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+}
+.template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.template-item {
+  padding: 10px 11px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+.template-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.template-item-title { font-weight: 600; font-size: 13.5px; }
+.template-item-body {
+  margin: 6px 0 0;
+  font: inherit;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-dim);
+}
+
+/* ---------- role badge (card) ---------- */
+
+.role-badge {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.role-badge[data-role="design"]    { background: var(--info-soft);   color: var(--info); }
+.role-badge[data-role="implement"] { background: var(--accent-soft); color: var(--accent); }
+.role-badge[data-role="review"]    { background: var(--warn-soft);   color: var(--warn); }
+.role-badge[data-role="test"]      { background: var(--danger-soft); color: var(--danger); }
+
+/* ---------- diff view ---------- */
+
+.diff-dialog-body { padding: 14px 18px; overflow: auto; max-height: calc(84vh - 52px); }
+.diff-stat {
+  margin: 0 0 10px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+.diff-view {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-line { display: block; }
+.diff-add  { background: var(--accent-soft); color: var(--accent); }
+.diff-del  { background: var(--danger-soft); color: var(--danger); }
+.diff-hunk { color: var(--info); font-weight: 600; }
+.diff-file { color: var(--text-dim); font-weight: 600; }
+
+/* ---------- skills: 作成フォーム ---------- */
+
+.skills-scroll { overflow-y: auto; max-height: calc(84vh - 52px); }
+.skill-editor {
+  margin: 0 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.skill-editor summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+.skill-editor .config-form { margin-top: 12px; }
+.skill-editor textarea { font-family: var(--mono); font-size: 12px; }
+
+/* ---------- pipeline ---------- */
+
+dialog.wide { width: min(1180px, 96vw); }
+
+.pipeline-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 18px;
+  max-height: calc(84vh - 52px);
+  overflow-y: auto;
+}
+.pipeline-new-form { display: flex; gap: 8px; }
+.pipeline-new-form input {
+  flex: 1;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.pipeline-board {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(160px, 1fr));
+  gap: 10px;
+}
+.pipeline-col {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 80px;
+}
+.pipeline-col-head { display: flex; flex-direction: column; gap: 2px; }
+.pipeline-col-label { font-weight: 700; font-size: 12.5px; }
+.pipeline-col-project { font-size: 10.5px; color: var(--text-dim); }
+.pipeline-col-list { display: flex; flex-direction: column; gap: 6px; }
+.pipeline-ticket {
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 8px;
+  width: 100%;
+}
+.pipeline-ticket:hover { border-color: var(--accent); }
+.pipeline-ticket.is-selected { background: var(--accent-soft); border-color: var(--accent); }
+.pipeline-ticket-title { font-size: 12.5px; font-weight: 600; }
+.pipeline-ticket-meta { font-size: 10.5px; color: var(--text-dim); margin-top: 2px; }
+
+.pipeline-detail {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pipeline-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pipeline-detail-head h4 { margin: 0; font-size: 14.5px; }
+.pipeline-detail-meta { margin: 0; font-size: 12.5px; color: var(--text-dim); }
+.pipeline-note {
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+}
+.pipeline-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.pipeline-subhead { font-weight: 600; font-size: 12.5px; margin-bottom: 6px; }
+.pipeline-history { font-size: 12px; }
+.pipeline-history-row { padding: 4px 0; border-bottom: 1px dashed var(--border); }
+.pipeline-history-note { color: var(--text-dim); margin-top: 2px; }
+
+.pipeline-artifacts-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.pipeline-artifacts-view {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+@media (max-width: 860px) {
+  .pipeline-board { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
 }

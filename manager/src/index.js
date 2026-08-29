@@ -4,9 +4,12 @@ import { listContainerConfigs, publicDir } from './config.js';
 import { startPolling } from './remoteUsage.js';
 import configRouter from './routes/config.js';
 import containersRouter from './routes/containers.js';
+import pipelineRouter from './routes/pipeline.js';
 import sessionsRouter from './routes/sessions.js';
 import skillsRouter from './routes/skills.js';
+import skillTemplatesRouter from './routes/skillTemplates.js';
 import tasksRouter from './routes/tasks.js';
+import templatesRouter from './routes/templates.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -32,6 +35,9 @@ app.use('/api/containers', sessionsRouter);
 app.use('/api/containers', authRouter);
 app.use('/api/containers', skillsRouter);
 app.use('/api/config', configRouter);
+app.use('/api/templates', templatesRouter);
+app.use('/api/pipeline', pipelineRouter);
+app.use('/api/skill-templates', skillTemplatesRouter);
 
 app.use(express.static(publicDir));
 

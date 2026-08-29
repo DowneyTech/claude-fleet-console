@@ -3,7 +3,9 @@ import {
   addProject,
   applyCompose,
   getComposeView,
+  MODEL_PRESETS,
   PERMISSION_MODES,
+  ROLE_PRESETS,
   updateProjectMeta,
   updateWorkspaceHostPath,
 } from '../composeStore.js';
@@ -20,8 +22,8 @@ router.get('/projects', (_req, res, next) => {
 
 router.post('/projects', (req, res, next) => {
   try {
-    const { name, displayName, hostPath, permissionMode, allowedTools } = req.body ?? {};
-    addProject({ name, displayName, hostPath, permissionMode, allowedTools });
+    const { name, displayName, hostPath, permissionMode, allowedTools, model, role } = req.body ?? {};
+    addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role });
     res.status(201).json(getComposeView());
   } catch (err) {
     next(err);
@@ -30,10 +32,16 @@ router.post('/projects', (req, res, next) => {
 
 router.put('/projects/:name', (req, res, next) => {
   try {
-    const { hostPath, displayName, permissionMode, allowedTools } = req.body ?? {};
+    const { hostPath, displayName, permissionMode, allowedTools, model, role } = req.body ?? {};
     if (hostPath !== undefined) updateWorkspaceHostPath(req.params.name, hostPath);
-    if (displayName !== undefined || permissionMode !== undefined || allowedTools !== undefined) {
-      updateProjectMeta(req.params.name, { displayName, permissionMode, allowedTools });
+    if (
+      displayName !== undefined ||
+      permissionMode !== undefined ||
+      allowedTools !== undefined ||
+      model !== undefined ||
+      role !== undefined
+    ) {
+      updateProjectMeta(req.params.name, { displayName, permissionMode, allowedTools, model, role });
     }
     res.json(getComposeView());
   } catch (err) {
@@ -43,6 +51,14 @@ router.put('/projects/:name', (req, res, next) => {
 
 router.get('/permission-modes', (_req, res) => {
   res.json({ modes: PERMISSION_MODES });
+});
+
+router.get('/models', (_req, res) => {
+  res.json({ presets: MODEL_PRESETS });
+});
+
+router.get('/role-presets', (_req, res) => {
+  res.json({ presets: ROLE_PRESETS });
 });
 
 router.post('/apply', async (req, res, next) => {

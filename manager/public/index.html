@@ -15,6 +15,8 @@
   </div>
   <div class="topbar-side">
     <span class="poll" id="poll-state" title="5秒ごとに状態を取得しています">●</span>
+    <button type="button" id="open-pipeline" class="ghost">パイプライン</button>
+    <button type="button" id="open-templates" class="ghost">テンプレート</button>
     <button type="button" id="add-project" class="ghost">＋ プロジェクト追加</button>
     <button type="button" id="refresh">更新</button>
   </div>
@@ -42,6 +44,7 @@
           <code class="card-name"></code>
         </div>
       </div>
+      <span class="role-badge" hidden></span>
       <span class="pill" data-activity="idle"><i></i><span class="pill-text"></span></span>
     </div>
 
@@ -49,9 +52,20 @@
       <div><dt>状態</dt><dd class="m-state">—</dd></div>
       <div><dt>最終活動</dt><dd class="m-activity">—</dd></div>
       <div><dt>セッション</dt><dd class="m-session mono">—</dd></div>
+      <div><dt>既定モデル</dt><dd class="m-model mono">—</dd></div>
       <div><dt>認証</dt><dd class="m-auth">—</dd></div>
-      <div><dt>参照フォルダ（workspace）</dt><dd class="m-workspace mono">—</dd></div>
-      <div><dt>参照フォルダ（vault）</dt><dd class="m-vault mono">—</dd></div>
+      <div><dt>CPU使用率</dt><dd class="m-cpu mono">—</dd></div>
+      <div><dt>メモリ使用量</dt><dd class="m-mem mono">—</dd></div>
+      <div>
+        <dt>参照フォルダ（workspace）</dt>
+        <dd class="m-workspace mono copyable" tabindex="0" role="button">—</dd>
+        <span class="copy-hint">コピーしました</span>
+      </div>
+      <div>
+        <dt>参照フォルダ（vault）</dt>
+        <dd class="m-vault mono copyable" tabindex="0" role="button">—</dd>
+        <span class="copy-hint">コピーしました</span>
+      </div>
     </dl>
 
     <!-- レート上限（5時間 / 週）。カード上部に常時出す。 -->
@@ -64,6 +78,7 @@
       <button type="button" data-action="auth" class="ghost">認証</button>
       <button type="button" data-action="history" class="ghost">履歴</button>
       <button type="button" data-action="skills" class="ghost">Skills</button>
+      <button type="button" data-action="diff" class="ghost">差分</button>
       <button type="button" data-action="config" class="ghost">設定</button>
     </div>
 
@@ -83,9 +98,21 @@
           <input type="checkbox" class="new-session">
           <span>新しいセッションで開始</span>
         </label>
+        <select class="template-select" title="よく使う指示をテンプレートから挿入する">
+          <option value="">テンプレートを挿入…</option>
+        </select>
+        <select class="model-select" title="このタスクだけモデルを切り替える（空欄なら既定モデルを使用）">
+          <option value="">既定モデル</option>
+          <option value="opus">Opus</option>
+          <option value="sonnet">Sonnet</option>
+          <option value="haiku">Haiku</option>
+        </select>
         <button type="submit" class="send">送信</button>
       </div>
     </form>
+
+    <!-- 実行中のコンテナへ追加投入したタスク。現在のタスク完了後に自動で起動する。 -->
+    <section class="queue-list" hidden aria-label="キュー待ちタスク"></section>
 
     <!-- 直近の回答のみを表示する。新しいタスクを送るたびに中身をリセットする。 -->
     <section class="answer-wrap" hidden>
@@ -99,6 +126,7 @@
       <div class="stream-head">
         <span class="stream-title">実行ログ</span>
         <span class="stream-status"></span>
+        <button type="button" class="cancel ghost" hidden>停止</button>
       </div>
       <div class="stream" aria-live="polite"></div>
     </section>
@@ -128,13 +156,51 @@
   </div>
 </dialog>
 
-<!-- Skills 一覧ダイアログ -->
+<!-- Skills 一覧 + 作成ダイアログ -->
 <dialog id="skills-dialog">
   <div class="dialog-head">
     <h3 id="skills-title">Skills</h3>
     <button type="button" id="skills-close" aria-label="閉じる">✕</button>
   </div>
-  <div class="skills-body" id="skills-body">
+  <div class="skills-scroll">
+    <div class="skills-body" id="skills-body">
+      <p class="hint">読み込み中…</p>
+    </div>
+
+    <details class="skill-editor">
+      <summary>SKILL.md を作成・上書きする</summary>
+      <form id="skill-form" class="config-form">
+        <label class="field">
+          <span>役割テンプレートから挿入（任意）</span>
+          <select id="skill-role-select">
+            <option value="">— カスタム —</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>スラッグ（ディレクトリ名）</span>
+          <input type="text" name="slug" placeholder="design-review"
+                 pattern="[a-z0-9][a-z0-9-]{0,60}" autocomplete="off" required>
+          <small><code>.claude/skills/&lt;slug&gt;/SKILL.md</code> として保存されます。既存と同じスラッグなら上書きします。</small>
+        </label>
+        <label class="field">
+          <span>SKILL.md の内容</span>
+          <textarea name="content" rows="10" required></textarea>
+        </label>
+        <div class="config-actions">
+          <button type="submit" class="send">このプロジェクトに保存</button>
+        </div>
+      </form>
+    </details>
+  </div>
+</dialog>
+
+<!-- git diff 表示ダイアログ -->
+<dialog id="diff-dialog">
+  <div class="dialog-head">
+    <h3 id="diff-title">差分</h3>
+    <button type="button" id="diff-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="diff-dialog-body" id="diff-body">
     <p class="hint">読み込み中…</p>
   </div>
 </dialog>
@@ -167,6 +233,24 @@
         <p class="static-value mono" id="config-vault">—</p>
       </div>
       <label class="field">
+        <span>役割（パイプライン用、任意）</span>
+        <select name="role">
+          <option value="">未設定</option>
+          <option value="design">設計</option>
+          <option value="implement">実装</option>
+          <option value="review">レビュー</option>
+          <option value="test">テスト</option>
+        </select>
+        <small>
+          設計→実装→レビュー→テストのどの工程を担当するかの印。「パイプライン」機能はここで
+          役割を設定したプロジェクトへ自動でタスクを送る。
+        </small>
+      </label>
+      <div class="field">
+        <button type="button" id="config-apply-role-preset" class="ghost">選択した役割のおすすめ設定を適用</button>
+        <small>permissionMode と allowedTools を役割ごとの推奨値で置き換えます（下の「保存」を押すまで確定しません）。</small>
+      </div>
+      <label class="field">
         <span>permissionMode</span>
         <select name="permissionMode">
           <option value="bypassPermissions">bypassPermissions（確認なしで実行）</option>
@@ -179,6 +263,16 @@
         <span>allowedTools（カンマ区切り、任意）</span>
         <input type="text" name="allowedTools" placeholder="Read, Grep, Glob" autocomplete="off">
         <small>空欄なら制限なし。指定するとそのツールのみに制限されます。</small>
+      </label>
+      <label class="field">
+        <span>既定モデル</span>
+        <select name="model">
+          <option value="">アカウント既定（--model 省略）</option>
+          <option value="opus">Opus</option>
+          <option value="sonnet">Sonnet</option>
+          <option value="haiku">Haiku</option>
+        </select>
+        <small>タスク投入フォームでその都度上書きできます。</small>
       </label>
 
       <div class="config-actions">
@@ -199,6 +293,46 @@
     </div>
 
     <pre class="config-log" id="config-log" hidden></pre>
+  </div>
+</dialog>
+
+<!-- プロンプトテンプレート管理ダイアログ -->
+<dialog id="templates-dialog">
+  <div class="dialog-head">
+    <h3>プロンプトテンプレート</h3>
+    <button type="button" id="templates-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="templates-body">
+    <form id="template-form" class="config-form">
+      <label class="field">
+        <span>タイトル</span>
+        <input type="text" name="title" placeholder="例: 変更をコミット" autocomplete="off" required>
+      </label>
+      <label class="field">
+        <span>プロンプト本文</span>
+        <textarea name="prompt" rows="3" placeholder="例: 変更内容をまとめてコミットしてください" required></textarea>
+      </label>
+      <div class="config-actions">
+        <button type="submit" class="send">追加</button>
+      </div>
+    </form>
+    <ul id="template-list" class="template-list"></ul>
+  </div>
+</dialog>
+
+<!-- パイプライン（設計→実装→レビュー→テスト）ダイアログ -->
+<dialog id="pipeline-dialog" class="wide">
+  <div class="dialog-head">
+    <h3>パイプライン（設計 → 実装 → レビュー → テスト）</h3>
+    <button type="button" id="pipeline-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="pipeline-body">
+    <form id="pipeline-new-form" class="pipeline-new-form">
+      <input type="text" name="title" placeholder="新しい案件名（例: ログイン画面の改修）" autocomplete="off" required>
+      <button type="submit" class="send">＋ 追加</button>
+    </form>
+    <div id="pipeline-board" class="pipeline-board"></div>
+    <section id="pipeline-detail" class="pipeline-detail" hidden></section>
   </div>
 </dialog>
 

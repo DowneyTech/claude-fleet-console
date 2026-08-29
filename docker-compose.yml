@@ -15,6 +15,9 @@ services:
       # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
       # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
       - ${HOME}/Project:/vault:ro
+      # 設計 → 実装 → レビュー → テストで成果物を受け渡すための共有フォルダ（rw）。
+      # 全プロジェクトコンテナ + manager 自身にも同じホストパスをマウントする。
+      - ${HOME}/Project/.fleet-handoff:/handoff
 
   claude-project-b:
     build: .
@@ -30,6 +33,21 @@ services:
       # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
       # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
       - ${HOME}/Project:/vault:ro
+      - ${HOME}/Project/.fleet-handoff:/handoff
+
+  claude-project-d:
+    build: .
+    container_name: claude-project-d
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    volumes:
+      - claude-project-d-config:/home/claude/.claude
+      - ${HOME}/project-d:/workspace
+      - ${HOME}/Project:/vault:ro
+      - ${HOME}/Project/.fleet-handoff:/handoff
 
   manager:
     build: ./manager
@@ -57,10 +75,14 @@ services:
       # おけば、誰が・どこから `docker compose` を呼んでも再解釈されない。
       # プロジェクトルートを移動した場合はここも合わせて書き換えること。
       - /Users/kinchan/Project/claude-containers:/compose-project
+      # プロジェクトコンテナと同じホストパスを manager 自身にもマウントし、
+      # 各コンテナが停止していても handoff 成果物を fs で直接読み書きできるようにする。
+      - ${HOME}/Project/.fleet-handoff:/handoff
     depends_on:
       - claude-project-a
       - claude-project-b
       - claude-project-c
+      - claude-project-d
 
   claude-project-c:
     build: .
@@ -74,8 +96,10 @@ services:
       - claude-project-c-config:/home/claude/.claude
       - ${HOME}/project-c:/workspace
       - ${HOME}/Project:/vault:ro
+      - ${HOME}/Project/.fleet-handoff:/handoff
 
 volumes:
   claude-project-a-config:
   claude-project-b-config:
   claude-project-c-config:
+  claude-project-d-config:

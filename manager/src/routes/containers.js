@@ -1,12 +1,22 @@
 import { Router } from 'express';
 import { authStatus, loginView } from '../authFlow.js';
 import { listContainerConfigs, requireContainer } from '../config.js';
-import { inspect, lifecycle } from '../docker.js';
+import { getComposeView } from '../composeStore.js';
+import { execCapture, inspect, lifecycle, stats } from '../docker.js';
 import { configWritable, latestSession } from '../sessionStore.js';
-import { getTask, isBusy, snapshot } from '../taskRunner.js';
+import { getQueue, getTask, isBusy, snapshot } from '../taskRunner.js';
 import { fleetUsage, onUsageChange, rateLimitsFor, resetUsage, usageFor } from '../usageStore.js';
 
 const router = Router();
+
+/** docker-compose.yml が読めない環境（開発時など）でも一覧表示自体は壊さない。 */
+function composeProjectsSafe() {
+  try {
+    return getComposeView().projects;
+  } catch {
+    return [];
+  }
+}
 
 const RECENT_WINDOW_MS = 2 * 60 * 1000;
 
@@ -20,38 +30,46 @@ function classify({ state, busy, lastActivity }) {
   return 'idle';
 }
 
-async function describe(cfg) {
+async function describe(cfg, composeProjects) {
   const info = await inspect(cfg.name);
   const state = info ? info.State.Status : 'missing';
   const busy = isBusy(cfg.name);
 
-  // 停止中のコンテナには exec できないので、活動時刻と認証状態の取得は起動中だけ。
+  // 停止中のコンテナには exec できないので、活動時刻・認証状態・リソース使用量の
+  // 取得は起動中だけ。
   let session = null;
   let auth = { loggedIn: false, authMethod: 'unknown', apiProvider: null };
   let writable = true;
+  let resources = null;
   if (state === 'running') {
-    [session, auth, writable] = await Promise.all([
+    [session, auth, writable, resources] = await Promise.all([
       latestSession(cfg.name, cfg.workspacePath).catch(() => null),
       authStatus(cfg.name),
       configWritable(cfg.name).catch(() => true),
+      stats(cfg.name).catch(() => null),
     ]);
   }
 
   const lastActivity = session?.mtime ?? null;
 
   // ホスト側のどのフォルダを参照しているか（workspace / vault のマウント元）。
-  // docker inspect の実マウントを見るので、compose ファイルをまだ適用していない
-  // 変更中の値ではなく、実際に今動いている値を返す。
-  const mounts = (info?.Mounts ?? [])
-    .filter((m) => m.Destination === cfg.workspacePath || m.Destination === '/vault')
-    .map((m) => ({ destination: m.Destination, source: m.Source, readOnly: !m.RW }));
+  // docker-compose.yml の記述（${HOME} などの変数）を実際のホストパスへ展開した
+  // ものを返す。docker inspect の実マウントだと Docker Desktop の VM 内部パス
+  // （/host_mnt/... 等）になり、ホスト上でそのまま開けるパスにならないため。
+  const project = composeProjects?.find((p) => p.name === cfg.name);
+  const hostPaths = {
+    workspace: project?.hostWorkspacePathResolved ?? null,
+    vault: project?.hostVaultPathResolved ?? null,
+  };
 
   return {
     name: cfg.name,
     displayName: cfg.displayName,
     workspacePath: cfg.workspacePath,
     permissionMode: cfg.permissionMode,
-    mounts,
+    model: cfg.model,
+    role: cfg.role,
+    hostPaths,
     state,
     activity: classify({ state, busy, lastActivity }),
     busy,
@@ -59,11 +77,20 @@ async function describe(cfg) {
     lastActivity,
     latestSessionId: session?.id ?? null,
     task: snapshot(getTask(cfg.name)),
+    // プロンプトは一覧表示に使う分だけあれば十分なので、ここで切り詰めておく。
+    queue: getQueue(cfg.name).map((item) => ({
+      id: item.id,
+      prompt: item.prompt.length > 200 ? `${item.prompt.slice(0, 200)}…` : item.prompt,
+      model: item.model,
+      newSession: item.newSession,
+      queuedAt: item.queuedAt,
+    })),
     auth,
     configWritable: writable,
     login: loginView(cfg.name),
     usage: usageFor(cfg.name),
     rateLimits: rateLimitsFor(cfg.name),
+    resources,
   };
 }
 
@@ -81,7 +108,10 @@ function usageSnapshot() {
 
 router.get('/', async (_req, res, next) => {
   try {
-    const containers = await Promise.all(listContainerConfigs().map(describe));
+    const composeProjects = composeProjectsSafe();
+    const containers = await Promise.all(
+      listContainerConfigs().map((cfg) => describe(cfg, composeProjects)),
+    );
     res.json({ containers, usage: fleetUsage(), now: Date.now() });
   } catch (err) {
     next(err);
@@ -125,7 +155,38 @@ router.delete('/:name/usage', requireContainer, (req, res) => {
 
 router.get('/:name', requireContainer, async (req, res, next) => {
   try {
-    res.json(await describe(req.containerConfig));
+    res.json(await describe(req.containerConfig, composeProjectsSafe()));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * このコンテナの workspace の git diff（レビュー工程で使う想定）。
+ * `-C` に workspacePath を渡すだけで、シェルを挟まないのでクォート事故もない。
+ */
+router.get('/:name/diff', requireContainer, async (req, res, next) => {
+  try {
+    const cfg = req.containerConfig;
+    const info = await inspect(cfg.name);
+    if (!info || info.State.Status !== 'running') {
+      return res.json({ isRepo: false, diff: '', stat: '', message: 'コンテナが起動していません' });
+    }
+
+    const diffResult = await execCapture(cfg.name, ['git', '-C', cfg.workspacePath, 'diff']);
+    if (diffResult.exitCode !== 0) {
+      // リポジトリでない場合、git はエラー行に続けて長い usage を吐く。
+      // UI には原因の要点（先頭行）だけ見えればよい。
+      const firstLine = diffResult.stderr.trim().split('\n')[0];
+      return res.json({
+        isRepo: false,
+        diff: '',
+        stat: '',
+        message: firstLine || 'git リポジトリではありません',
+      });
+    }
+    const statResult = await execCapture(cfg.name, ['git', '-C', cfg.workspacePath, 'diff', '--stat']);
+    res.json({ isRepo: true, diff: diffResult.stdout, stat: statResult.stdout, message: null });
   } catch (err) {
     next(err);
   }
@@ -135,14 +196,14 @@ for (const action of ['start', 'stop', 'restart']) {
   router.post(`/:name/${action}`, requireContainer, async (req, res, next) => {
     try {
       await lifecycle(req.containerConfig.name, action);
-      res.json(await describe(req.containerConfig));
+      res.json(await describe(req.containerConfig, composeProjectsSafe()));
     } catch (err) {
       if (err.statusCode === 404) {
         return res.status(404).json({ error: 'コンテナが未作成です。docker compose up -d を先に実行してください。' });
       }
       // 既に起動済み / 停止済みなど、状態が要求と一致しない場合。
       if (err.statusCode === 304) {
-        return res.json(await describe(req.containerConfig));
+        return res.json(await describe(req.containerConfig, composeProjectsSafe()));
       }
       next(err);
     }

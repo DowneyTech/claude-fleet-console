@@ -33,6 +33,10 @@ function parse(raw) {
       workspacePath: entry.workspacePath ?? '/workspace',
       permissionMode: entry.permissionMode ?? 'bypassPermissions',
       allowedTools: entry.allowedTools ?? null,
+      model: entry.model ?? null,
+      // パイプライン機能（設計/実装/レビュー/テスト）でどの工程を担当するかの印。
+      // 任意項目。未設定なら他機能から役割ベースで名指しされることはない。
+      role: entry.role ?? null,
     };
   });
 }

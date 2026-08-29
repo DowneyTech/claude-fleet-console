@@ -16,6 +16,48 @@ const COMPOSE_PATH = path.join(PROJECT_ROOT, 'docker-compose.yml');
 
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan'];
 
+/**
+ * 設計・実装・レビュー・テストのように役割特化でプロジェクトを分ける運用向けの
+ * permissionMode / allowedTools のプリセット。containers.config.json の role に
+ * 対応する。「設定 UI からワンクリックで適用する」ためのものであり、適用後も
+ * 通常どおり個別に上書きできる（強制ではない）。
+ */
+export const ROLE_PRESETS = {
+  design: {
+    label: '設計',
+    permissionMode: 'acceptEdits',
+    allowedTools: ['Read', 'Grep', 'Glob', 'Write', 'Edit', 'WebSearch'],
+  },
+  implement: {
+    label: '実装',
+    permissionMode: 'bypassPermissions',
+    allowedTools: [],
+  },
+  review: {
+    // plan モードはツールを実行せず計画止まりになるため、コードを直接編集
+    // させたくないレビュー役に向く。allowedTools も読み取り系のみに絞る。
+    label: 'レビュー',
+    permissionMode: 'plan',
+    allowedTools: ['Read', 'Grep', 'Glob'],
+  },
+  test: {
+    label: 'テスト',
+    permissionMode: 'acceptEdits',
+    allowedTools: ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'Edit'],
+  },
+};
+
+export const ROLES = Object.keys(ROLE_PRESETS);
+
+// UI の既定モデル選択肢。CLI 自体はフル ID（例: claude-opus-5）も受け付けるので、
+// ここに無い値も MODEL_RE を満たせば --model にそのまま渡す（拒否はしない）。
+export const MODEL_PRESETS = ['opus', 'sonnet', 'haiku'];
+const MODEL_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$/;
+
+export function validateModel(value) {
+  return typeof value === 'string' && MODEL_RE.test(value);
+}
+
 const NAME_RE = /^[a-z][a-z0-9-]{1,38}[a-z0-9]$/;
 // ${HOME}/foo のような変数展開と絶対パスのみ許可。シェル的に危険な文字は拒否する
 // （このパスはテキストとして compose ファイルへ書き戻すだけで、シェル評価はしない）。
@@ -23,6 +65,19 @@ const HOST_PATH_RE = /^(\$\{[A-Za-z_][A-Za-z0-9_]*\}|\/)[A-Za-z0-9_.\-/${}]*$/;
 
 function readText() {
   return readFileSync(COMPOSE_PATH, 'utf8');
+}
+
+/**
+ * compose ファイル中の `${HOME}` を、実際のホストの $HOME で展開する。
+ * manager コンテナ自身の HOME はホストの $HOME と一致しないため、applyCompose
+ * と同じ理由で HOST_HOME を使う（docker-compose.yml の manager サービスに設定済み）。
+ * HOST_HOME が未設定なら展開できないので、変数のまま返す。
+ */
+export function expandHostHome(rawPath) {
+  if (typeof rawPath !== 'string') return rawPath;
+  const hostHome = process.env.HOST_HOME;
+  if (!hostHome) return rawPath;
+  return rawPath.replace(/\$\{HOME\}/g, hostHome).replace(/\$HOME\b/g, hostHome);
 }
 
 function writeText(text) {
@@ -120,8 +175,14 @@ export function getComposeView() {
       workingDir,
       hostWorkspacePath,
       hostVaultPath,
+      // ダッシュボード表示用に ${HOME} を展開した実際のホストパス。
+      // hostWorkspacePath / hostVaultPath は編集フォームの元値として変数のまま残す。
+      hostWorkspacePathResolved: hostWorkspacePath ? expandHostHome(hostWorkspacePath) : null,
+      hostVaultPathResolved: hostVaultPath ? expandHostHome(hostVaultPath) : null,
       permissionMode: cfg?.permissionMode ?? 'bypassPermissions',
       allowedTools: cfg?.allowedTools ?? [],
+      model: cfg?.model ?? null,
+      role: cfg?.role ?? null,
       registeredInDashboard: Boolean(cfg),
     });
   }
@@ -168,8 +229,12 @@ export function updateWorkspaceHostPath(serviceName, newHostPath) {
   writeText(lines.join('\n'));
 }
 
+function validateRole(role) {
+  return role == null || role === '' || ROLES.includes(role);
+}
+
 /** 新しいプロジェクトのサービスを追加し、あわせて containers.config.json にも登録する。 */
-export function addProject({ name, displayName, hostPath, permissionMode, allowedTools }) {
+export function addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role }) {
   if (!validateProjectName(name)) {
     throw Object.assign(new Error('プロジェクト名は英小文字・数字・ハイフンのみ、2〜40文字で指定してください'), { status: 400 });
   }
@@ -178,6 +243,12 @@ export function addProject({ name, displayName, hostPath, permissionMode, allowe
   }
   if (permissionMode && !PERMISSION_MODES.includes(permissionMode)) {
     throw Object.assign(new Error('permissionMode が不正です'), { status: 400 });
+  }
+  if (model && !validateModel(model)) {
+    throw Object.assign(new Error('model が不正です'), { status: 400 });
+  }
+  if (!validateRole(role)) {
+    throw Object.assign(new Error('role が不正です'), { status: 400 });
   }
 
   const text = readText();
@@ -189,11 +260,16 @@ export function addProject({ name, displayName, hostPath, permissionMode, allowe
     throw Object.assign(new Error(`このコンテナ名は既に登録されています: ${name}`), { status: 409 });
   }
 
-  // 既存プロジェクトから vault のマウント元を踏襲する（無ければ ${HOME}/Project を既定にする）。
+  // 既存プロジェクトから vault / handoff のマウント元を踏襲する
+  // （無ければ ${HOME}/Project、${HOME}/Project/.fleet-handoff を既定にする）。
   const existing = Object.entries(doc?.services ?? {}).find(([n]) => n !== 'manager')?.[1];
   const existingVolumes = Array.isArray(existing?.volumes) ? existing.volumes : [];
   const vaultLine = existingVolumes.find((v) => String(v).endsWith(':/vault:ro'));
   const vaultSource = vaultLine ? String(vaultLine).slice(0, -':/vault:ro'.length) : '${HOME}/Project';
+  const handoffLine = existingVolumes.find((v) => String(v).endsWith(':/handoff'));
+  const handoffSource = handoffLine
+    ? String(handoffLine).slice(0, -':/handoff'.length)
+    : '${HOME}/Project/.fleet-handoff';
 
   const lines = text.split('\n');
 
@@ -211,6 +287,8 @@ export function addProject({ name, displayName, hostPath, permissionMode, allowe
     `      - ${name}-config:/home/claude/.claude`,
     `      - ${hostPath}:/workspace`,
     `      - ${vaultSource}:/vault:ro`,
+    // パイプライン機能（設計/実装/レビュー/テストの成果物受け渡し）で使う共有フォルダ。
+    `      - ${handoffSource}:/handoff`,
   ];
 
   const topVolumesIdx = lines.findIndex((l) => /^volumes:\s*$/.test(l));
@@ -253,14 +331,22 @@ export function addProject({ name, displayName, hostPath, permissionMode, allowe
     workspacePath: '/workspace',
     permissionMode: permissionMode || 'bypassPermissions',
     ...(Array.isArray(allowedTools) && allowedTools.length > 0 ? { allowedTools } : {}),
+    ...(model ? { model } : {}),
+    ...(role ? { role } : {}),
   });
   writeFileSync(configPath, `${JSON.stringify(configs, null, 2)}\n`);
 }
 
-/** displayName / permissionMode / allowedTools を containers.config.json 側で更新する。 */
-export function updateProjectMeta(name, { displayName, permissionMode, allowedTools }) {
+/** displayName / permissionMode / allowedTools / model / role を containers.config.json 側で更新する。 */
+export function updateProjectMeta(name, { displayName, permissionMode, allowedTools, model, role }) {
   if (permissionMode && !PERMISSION_MODES.includes(permissionMode)) {
     throw Object.assign(new Error('permissionMode が不正です'), { status: 400 });
+  }
+  if (model && !validateModel(model)) {
+    throw Object.assign(new Error('model が不正です'), { status: 400 });
+  }
+  if (!validateRole(role)) {
+    throw Object.assign(new Error('role が不正です'), { status: 400 });
   }
   const configs = JSON.parse(readFileSync(configPath, 'utf8'));
   const entry = configs.find((c) => c.name === name);
@@ -273,6 +359,14 @@ export function updateProjectMeta(name, { displayName, permissionMode, allowedTo
   if (allowedTools !== undefined) {
     if (Array.isArray(allowedTools) && allowedTools.length > 0) entry.allowedTools = allowedTools;
     else delete entry.allowedTools;
+  }
+  if (model !== undefined) {
+    if (model) entry.model = model;
+    else delete entry.model;
+  }
+  if (role !== undefined) {
+    if (role) entry.role = role;
+    else delete entry.role;
   }
 
   writeFileSync(configPath, `${JSON.stringify(configs, null, 2)}\n`);

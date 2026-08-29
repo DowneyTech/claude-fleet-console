@@ -3,22 +3,35 @@
     "name": "claude-project-a",
     "displayName": "Project A",
     "workspacePath": "/workspace",
-    "permissionMode": "bypassPermissions"
+    "permissionMode": "acceptEdits",
+    "allowedTools": ["Read", "Grep", "Glob", "Write", "Edit", "WebSearch"],
+    "role": "design"
   },
   {
     "name": "claude-project-b",
     "displayName": "Project B",
     "workspacePath": "/workspace",
-    "permissionMode": "bypassPermissions"
+    "permissionMode": "bypassPermissions",
+    "role": "implement"
   },
   {
     "name": "claude-project-c",
     "displayName": "Project C (renamed)",
     "workspacePath": "/workspace",
-    "permissionMode": "acceptEdits",
+    "permissionMode": "plan",
     "allowedTools": [
       "Read",
-      "Grep"
-    ]
+      "Grep",
+      "Glob"
+    ],
+    "role": "review"
+  },
+  {
+    "name": "claude-project-d",
+    "displayName": "Project D",
+    "workspacePath": "/workspace",
+    "permissionMode": "acceptEdits",
+    "allowedTools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"],
+    "role": "test"
   }
 ]

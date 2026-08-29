@@ -106,10 +106,14 @@ docker compose exec claude-project-a bash
 | GET | `/api/containers` | 全コンテナの状態・最終活動時刻・実行中タスク・使用量・レート上限（+全体の合計） |
 | GET | `/api/containers/usage/stream` | ヘッダー用のコスト・トークン・レート上限の SSE（変更のたびに push） |
 | POST | `/api/containers/:name/start` \| `/stop` \| `/restart` | ライフサイクル操作 |
-| POST | `/api/containers/:name/tasks` | タスク投入（`{ prompt, newSession }`） |
+| POST | `/api/containers/:name/tasks` | タスク投入（`{ prompt, newSession, model }`）。busy なら自動でキューに積み `{ queued: true, item }` を返す |
+| DELETE | `/api/containers/:name/task` | 実行中タスクの停止 |
 | GET | `/api/containers/:name/task/stream` | 実行中タスクの SSE（既存イベントを再生してから購読） |
+| GET | `/api/containers/:name/tasks/queue` | 実行待ちタスクの一覧 |
+| DELETE | `/api/containers/:name/tasks/queue/:id` | 実行待ちタスクをキューから取り消し |
 | GET | `/api/containers/:name/sessions` | セッション一覧 |
 | GET | `/api/containers/:name/sessions/:id` | セッションの内容 |
+| POST | `/api/containers/:name/sessions/:id/resume` | 次のタスク投入で resume するセッションを指定した ID に切り替え |
 | GET | `/api/containers/:name/auth` | 認証状態（`claude auth status`）とログイン進行状況 |
 | POST | `/api/containers/:name/auth/login` | ログイン開始（認証 URL を返す） |
 | POST | `/api/containers/:name/auth/code` | 認証コードを CLI の stdin へ渡す |
@@ -158,6 +162,21 @@ Claude の応答（実行ログの本文と履歴のテキスト）は Markdown 
 3. それも無ければ UUID を新規発行して `--session-id` で開始
 
 UI の「新しいセッションで開始」にチェックを入れると、常に 3 になります。
+
+①のメモリ上の ID は、履歴ダイアログで任意のセッションの「ここから再開」を押すことでも書き換えられます。最新でない過去のセッションから続きを始めたい場合に使います（実行中のタスクがある間は競合を避けるため切り替えを拒否します）。この ID もメモリ上にのみ保持しているため、manager コンテナを再作成するとリセットされ、次回投入時は②の探索に戻ります。
+
+### モデルの切り替え
+
+タスクは既定では `--model` を付けずに実行し、アカウント（CLI）側のデフォルトモデルに従います。
+
+- コンテナごとの既定値は `containers.config.json` の `model`（`opus` / `sonnet` / `haiku` などの CLI エイリアス、またはフルの ID）で設定でき、設定UI の「既定モデル」からも変更できます。
+- タスク投入フォームのセレクトで、その 1 回だけ既定値を上書きできます（`POST .../tasks` の `model`）。
+- どちらも空なら `--model` を省略し、CLI 側のデフォルトに委ねます。
+
+### タスクの停止・キュー投入
+
+- **停止**: 実行ログ右上の「停止」から、実行中のタスクを途中で止められます。同じコンテナでは `claude -p` プロセスは常に高々 1 個という前提でコマンドライン先頭一致により対象を絞って `SIGTERM` を送ります。`claude` が起動した個々のツール実行（子プロセス）までは追わない既知の制約があります。
+- **キュー投入**: busy なコンテナへ投入すると、拒否されずに自動でキューへ積まれます（「送信」ボタンが「キューに追加」に変わります）。現在のタスクが完了・失敗・キャンセルのいずれで終わっても、直後にキューの先頭が自動で起動します。キューは各コンテナ・各アイテムとも `newSession` / `model` を個別に保持し、カード上の一覧から個別に取り消せます。キューはメモリ上にのみ保持しており、manager コンテナを再作成すると失われます。
 
 ## セキュリティ上の注意
 

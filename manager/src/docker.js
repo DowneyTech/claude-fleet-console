@@ -27,6 +27,41 @@ export async function lifecycle(name, action) {
   throw new Error(`unknown action: ${action}`);
 }
 
+/**
+ * `docker stats --no-stream` 相当の 1 回分のスナップショットを計算する。
+ * CPU% は cpu_stats/precpu_stats の差分をシステム全体の経過時間で割る、
+ * `docker stats` と同じ算出方法。メモリはキャッシュ分を引いた実使用量にする
+ * （引かないと、ページキャッシュを多く抱えているだけのコンテナが常に
+ * 上限近くに見えてしまう）。
+ */
+function computeStats(raw) {
+  const cpuUsage = raw.cpu_stats?.cpu_usage ?? {};
+  const precpuUsage = raw.precpu_stats?.cpu_usage ?? {};
+  const cpuDelta = (cpuUsage.total_usage ?? 0) - (precpuUsage.total_usage ?? 0);
+  const systemDelta = (raw.cpu_stats?.system_cpu_usage ?? 0) - (raw.precpu_stats?.system_cpu_usage ?? 0);
+  const onlineCpus = raw.cpu_stats?.online_cpus || cpuUsage.percpu_usage?.length || 1;
+  const cpuPercent = systemDelta > 0 && cpuDelta > 0 ? (cpuDelta / systemDelta) * onlineCpus * 100 : 0;
+
+  const memStats = raw.memory_stats ?? {};
+  const cache = memStats.stats?.total_inactive_file ?? memStats.stats?.inactive_file ?? memStats.stats?.cache ?? 0;
+  const memUsedBytes = Math.max(0, (memStats.usage ?? 0) - cache);
+  const memLimitBytes = memStats.limit ?? 0;
+  const memPercent = memLimitBytes > 0 ? (memUsedBytes / memLimitBytes) * 100 : 0;
+
+  return {
+    cpuPercent: Number(cpuPercent.toFixed(1)),
+    memUsedBytes,
+    memLimitBytes,
+    memPercent: Number(memPercent.toFixed(1)),
+  };
+}
+
+/** 起動中のコンテナの CPU / メモリ使用量を 1 回だけ取得する。停止中は呼べない。 */
+export async function stats(name) {
+  const raw = await container(name).stats({ stream: false });
+  return computeStats(raw);
+}
+
 // 状態取得系の exec は短時間で返るはず。返らない場合は諦める。
 // 上限が無いと、1 本の exec がハングしただけで呼び出し元のループが永久に止まる。
 const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
@@ -104,6 +139,21 @@ export async function execCapture(name, cmd, { workingDir, timeoutMs = DEFAULT_E
     stderr: Buffer.concat(errChunks).toString('utf8'),
     exitCode: await finalExitCode(exec),
   };
+}
+
+/**
+ * コンテナ内の任意パスへテキストファイルを書き込む（無ければ親ディレクトリごと作る）。
+ * exec の引数として渡すため base64 化して bash の here-string 経由で書き戻す
+ * （シェル的な特殊文字やクォート事故を避けるため、パス・本文とも位置引数 $1/$2 で渡し、
+ * 文字列展開・解釈を一切させない）。イメージには bash と base64 が入っている前提。
+ */
+export async function writeFile(name, filePath, content) {
+  const b64 = Buffer.from(content, 'utf8').toString('base64');
+  const script = 'set -e; dir="$(dirname "$1")"; mkdir -p "$dir"; base64 -d <<< "$2" > "$1"';
+  const { exitCode, stderr } = await execCapture(name, ['bash', '-c', script, 'bash', filePath, b64]);
+  if (exitCode !== 0) {
+    throw Object.assign(new Error(stderr.trim() || 'ファイルの書き込みに失敗しました'), { status: 500 });
+  }
 }
 
 /**

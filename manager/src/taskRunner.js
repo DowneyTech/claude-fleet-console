@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { execLines } from './docker.js';
+import { getContainerConfig } from './config.js';
+import { execCapture, execLines } from './docker.js';
 import { pollContainer } from './remoteUsage.js';
 import { clearCurrent, resolveSession } from './sessionStore.js';
 import { recordResult } from './usageStore.js';
@@ -7,6 +8,10 @@ import { recordResult } from './usageStore.js';
 // コンテナ名 → 現在（または直近）のタスク。ページを再読み込みしても
 // 実行中タスクに再アタッチできるよう、イベントをここに貯めておく。
 const tasks = new Map();
+
+// コンテナ名 → 実行待ちのタスク配列。busy なコンテナへの投入はここに積み、
+// 現在のタスクが終わるたびに先頭から自動で起動する（すべてメモリ上のみ）。
+const queues = new Map();
 
 const MAX_EVENTS = 3000;
 
@@ -17,6 +22,44 @@ export function getTask(name) {
 export function isBusy(name) {
   const task = tasks.get(name);
   return Boolean(task) && !task.done;
+}
+
+export function getQueue(name) {
+  return queues.get(name) ?? [];
+}
+
+function queueTask(cfg, { prompt, newSession, model }) {
+  const item = { id: randomUUID(), prompt, newSession: Boolean(newSession), model: model || null, queuedAt: Date.now() };
+  const q = queues.get(cfg.name) ?? [];
+  q.push(item);
+  queues.set(cfg.name, q);
+  return item;
+}
+
+export function removeQueued(name, id) {
+  const q = queues.get(name);
+  if (!q) return false;
+  const idx = q.findIndex((item) => item.id === id);
+  if (idx === -1) return false;
+  q.splice(idx, 1);
+  return true;
+}
+
+/**
+ * 現在のタスクが終わった直後に呼ぶ。キューの先頭があれば自動で起動する。
+ * キュー投入から起動までの間に設定UI で permissionMode 等が変わっている
+ * 可能性があるので、実行中タスクの cfg をそのまま使い回さず読み直す。
+ */
+function startNextQueued(cfg) {
+  const q = queues.get(cfg.name);
+  if (!q || q.length === 0) return;
+  const next = q.shift();
+  const freshCfg = getContainerConfig(cfg.name) ?? cfg;
+  startTask(freshCfg, { prompt: next.prompt, newSession: next.newSession, model: next.model }).catch((err) => {
+    // busy チェックとキュー投入は同期的に行っているため通常は起きないはずだが、
+    // 念のため握りつぶさずログには残す。
+    console.error(`[taskRunner] キュー投入タスクの起動に失敗しました (${cfg.name}): ${err.message}`);
+  });
 }
 
 function emit(task, kind, data) {
@@ -67,7 +110,12 @@ function finish(task, { exitCode, error }) {
   task.exitCode = exitCode ?? null;
   task.error = error ?? null;
 
-  emit(task, 'end', { exitCode: task.exitCode, error: task.error, durationMs: task.endedAt - task.startedAt });
+  emit(task, 'end', {
+    exitCode: task.exitCode,
+    error: task.error,
+    durationMs: task.endedAt - task.startedAt,
+    cancelled: task.cancelRequested,
+  });
 
   for (const res of task.subscribers) {
     res.write(`event: closed\ndata: ${JSON.stringify({ exitCode: task.exitCode })}\n\n`);
@@ -78,24 +126,34 @@ function finish(task, { exitCode, error }) {
 
 /**
  * コンテナ内で `claude -p` を起動し、stream-json の各行をイベントとして貯める。
- * 同じコンテナで実行中のタスクがある場合は例外（呼び出し側が 409 にする）。
+ *
+ * 同じコンテナで実行中のタスクがある場合、`enqueueIfBusy` が真ならキューに積んで
+ * `{ queued: true, item }` を返す（呼び出し側が投入扱いにする）。偽なら例外を投げる
+ * （呼び出し側が 409 にする）。現在のタスクが終わるたびにキューの先頭が自動起動される。
  */
-export async function startTask(cfg, { prompt, newSession = false }) {
+export async function startTask(cfg, { prompt, newSession = false, model = null, enqueueIfBusy = false }) {
   if (isBusy(cfg.name)) {
+    if (enqueueIfBusy) {
+      return { queued: true, item: queueTask(cfg, { prompt, newSession, model }) };
+    }
     const err = new Error('このコンテナでは既にタスクが実行中です');
     err.status = 409;
     throw err;
   }
 
+  const resolvedModel = model || cfg.model || null;
+
   const task = {
     id: randomUUID(),
     container: cfg.name,
     prompt,
+    model: resolvedModel,
     sessionId: null,
     sessionMode: null,
     startedAt: Date.now(),
     endedAt: null,
     done: false,
+    cancelRequested: false,
     exitCode: null,
     error: null,
     usage: null,
@@ -125,11 +183,13 @@ export async function startTask(cfg, { prompt, newSession = false }) {
   if (Array.isArray(cfg.allowedTools) && cfg.allowedTools.length > 0) {
     cmd.push('--allowedTools', cfg.allowedTools.join(','));
   }
+  if (resolvedModel) cmd.push('--model', resolvedModel);
   // 新規セッションは ID を先に固定でき、以降は同じ ID を resume できる。
   cmd.push(session.mode === 'new' ? '--session-id' : '--resume', session.id);
 
   emit(task, 'start', {
     prompt,
+    model: resolvedModel,
     sessionId: session.id,
     sessionMode: session.mode,
     permissionMode: cfg.permissionMode ?? null,
@@ -170,7 +230,37 @@ export async function startTask(cfg, { prompt, newSession = false }) {
       // タスク実行はレート上限が変わる主な契機。30秒ポーリングを待たず
       // ここで前倒しして取得する（失敗しても pollContainer 内で握りつぶす）。
       pollContainer(cfg.name);
+      // このコンテナ宛にキューされたタスクがあれば、間を置かず次を起動する。
+      startNextQueued(cfg);
     });
+
+  return task;
+}
+
+/**
+ * 実行中のタスクを止める。同じコンテナでは isBusy により `claude -p` は常に
+ * 高々 1 プロセスなので、コマンドラインの先頭一致で安全に対象を絞れる
+ * （プロンプト文字列の中に同じ文字列が現れても、それは引数の途中なので
+ * 先頭一致にはならない）。claude が起動した個々のツール実行（子プロセス）
+ * までは追わない既知の制約がある。
+ */
+export async function cancelTask(cfg) {
+  const task = tasks.get(cfg.name);
+  if (!task || task.done) {
+    const err = new Error('実行中のタスクはありません');
+    err.status = 404;
+    throw err;
+  }
+
+  if (!task.cancelRequested) {
+    task.cancelRequested = true;
+    emit(task, 'cancel', {});
+    try {
+      await execCapture(cfg.name, ['sh', '-c', "pkill -TERM -f '^claude -p ' || true"]);
+    } catch (err) {
+      emit(task, 'stderr', { text: `キャンセル処理に失敗しました: ${err.message}\n` });
+    }
+  }
 
   return task;
 }
@@ -182,11 +272,13 @@ export function snapshot(task) {
     id: task.id,
     container: task.container,
     prompt: task.prompt,
+    model: task.model,
     sessionId: task.sessionId,
     sessionMode: task.sessionMode,
     startedAt: task.startedAt,
     endedAt: task.endedAt,
     done: task.done,
+    cancelRequested: task.cancelRequested,
     exitCode: task.exitCode,
     error: task.error,
     usage: task.usage,
