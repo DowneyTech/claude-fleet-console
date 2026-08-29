@@ -1,0 +1,16 @@
+{
+  "name": "claude-fleet-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Code コンテナ群の稼働状況可視化・操作ダッシュボード",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.7",
+    "express": "^4.21.2",
+    "yaml": "^2.6.1"
+  }
+}

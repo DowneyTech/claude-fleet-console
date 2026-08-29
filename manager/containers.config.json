@@ -1,0 +1,24 @@
+[
+  {
+    "name": "claude-project-a",
+    "displayName": "Project A",
+    "workspacePath": "/workspace",
+    "permissionMode": "bypassPermissions"
+  },
+  {
+    "name": "claude-project-b",
+    "displayName": "Project B",
+    "workspacePath": "/workspace",
+    "permissionMode": "bypassPermissions"
+  },
+  {
+    "name": "claude-project-c",
+    "displayName": "Project C (renamed)",
+    "workspacePath": "/workspace",
+    "permissionMode": "acceptEdits",
+    "allowedTools": [
+      "Read",
+      "Grep"
+    ]
+  }
+]

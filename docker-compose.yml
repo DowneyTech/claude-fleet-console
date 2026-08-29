@@ -5,10 +5,16 @@ services:
     stdin_open: true
     tty: true
     working_dir: /workspace
+    # manager が docker exec で操作できるよう常駐させる。
+    # CMD ["bash"] のままだと非対話 stdin が即 EOF になり、up -d でコンテナが終了してしまう。
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
     volumes:
       - claude-project-a-config:/home/claude/.claude
-      - ${HOME}/project-a-config:/workspace
-      - ${HOME}/Project:/vault
+      - ${HOME}/project-a:/workspace
+      # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
+      # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
+      - ${HOME}/Project:/vault:ro
 
   claude-project-b:
     build: .
@@ -16,11 +22,60 @@ services:
     stdin_open: true
     tty: true
     working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
     volumes:
       - claude-project-b-config:/home/claude/.claude
       - ${HOME}/project-b:/workspace
-      - ${HOME}/Project:/vault
+      # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
+      # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
+      - ${HOME}/Project:/vault:ro
+
+  manager:
+    build: ./manager
+    container_name: claude-manager
+    restart: unless-stopped
+    # 認証機構を持たないため、必ず 127.0.0.1 限定で公開する。
+    ports:
+      - "127.0.0.1:4590:4590"
+    environment:
+      - PORT=4590
+      # 設定UI から `docker compose` を呼ぶとき、compose ファイル中の ${HOME} を
+      # manager コンテナ自身の HOME ではなくホストの実際の $HOME で展開させるために使う。
+      - HOST_HOME=${HOME}
+    # docker.sock はホストの root 相当の権限。manager 以外には渡さないこと。
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 設定UI から docker-compose.yml / containers.config.json を編集・反映するために
+      # プロジェクトルートを読み書き可能でマウントする。
+      #
+      # 相対パス（"." や ${PWD}）にしてはいけない: manager 自身が
+      # `docker compose` を呼ぶとき、CLI はこの行を自分の /compose-project
+      # という「見え方」（あるいは manager プロセス自身の PWD）を基準に解決
+      # してしまい、ホストに実在しないパスをバインドしようとして自分自身を
+      # 壊れた状態で再作成してしまう（実際に起きた障害）。絶対パスで固定して
+      # おけば、誰が・どこから `docker compose` を呼んでも再解釈されない。
+      # プロジェクトルートを移動した場合はここも合わせて書き換えること。
+      - /Users/kinchan/Project/claude-containers:/compose-project
+    depends_on:
+      - claude-project-a
+      - claude-project-b
+      - claude-project-c
+
+  claude-project-c:
+    build: .
+    container_name: claude-project-c
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    volumes:
+      - claude-project-c-config:/home/claude/.claude
+      - ${HOME}/project-c:/workspace
+      - ${HOME}/Project:/vault:ro
 
 volumes:
   claude-project-a-config:
   claude-project-b-config:
+  claude-project-c-config:

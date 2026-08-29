@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Fleet Console</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-main">
+    <h1>Claude Fleet Console</h1>
+    <p class="summary" id="summary">読み込み中…</p>
+  </div>
+  <div class="topbar-side">
+    <span class="poll" id="poll-state" title="5秒ごとに状態を取得しています">●</span>
+    <button type="button" id="add-project" class="ghost">＋ プロジェクト追加</button>
+    <button type="button" id="refresh">更新</button>
+  </div>
+</header>
+
+<div class="banner" id="banner" hidden>
+  <strong>権限バイパスで実行されます。</strong>
+  UI から投げたタスクは確認なしにコンテナ内でコマンド実行・ファイル編集を行います。
+</div>
+
+<main id="grid" class="grid"></main>
+
+<p class="empty" id="empty" hidden>containers.config.json に登録されたコンテナがありません。</p>
+
+<!-- コンテナカードのテンプレート -->
+<template id="card-template">
+  <article class="card">
+    <div class="card-head">
+      <div class="card-id">
+        <span class="character" data-activity="idle" aria-hidden="true">
+          <span class="character-face"></span>
+        </span>
+        <div class="card-titles">
+          <h2 class="card-title"></h2>
+          <code class="card-name"></code>
+        </div>
+      </div>
+      <span class="pill" data-activity="idle"><i></i><span class="pill-text"></span></span>
+    </div>
+
+    <dl class="meta">
+      <div><dt>状態</dt><dd class="m-state">—</dd></div>
+      <div><dt>最終活動</dt><dd class="m-activity">—</dd></div>
+      <div><dt>セッション</dt><dd class="m-session mono">—</dd></div>
+      <div><dt>認証</dt><dd class="m-auth">—</dd></div>
+      <div><dt>参照フォルダ（workspace）</dt><dd class="m-workspace mono">—</dd></div>
+      <div><dt>参照フォルダ（vault）</dt><dd class="m-vault mono">—</dd></div>
+    </dl>
+
+    <!-- レート上限（5時間 / 週）。カード上部に常時出す。 -->
+    <section class="gauges" hidden aria-label="レート上限"></section>
+
+    <div class="actions">
+      <button type="button" data-action="start">起動</button>
+      <button type="button" data-action="stop">停止</button>
+      <button type="button" data-action="restart">再起動</button>
+      <button type="button" data-action="auth" class="ghost">認証</button>
+      <button type="button" data-action="history" class="ghost">履歴</button>
+      <button type="button" data-action="skills" class="ghost">Skills</button>
+      <button type="button" data-action="config" class="ghost">設定</button>
+    </div>
+
+    <p class="config-notice" hidden>
+      <strong>設定ディレクトリに書き込めません。</strong>
+      <code>/home/claude/.claude</code> の所有者が <code>claude</code> になっていないため、認証情報もセッション履歴も保存されません。イメージを再ビルドし、設定ボリュームを作り直してください。
+    </p>
+
+    <p class="auth-notice" hidden>
+      未ログインのため、タスクを実行できません。<button type="button" class="link-btn" data-action="auth-inline">ログインする</button>
+    </p>
+
+    <form class="composer">
+      <textarea rows="2" placeholder="このコンテナの Claude に指示を出す…" required></textarea>
+      <div class="composer-foot">
+        <label class="check">
+          <input type="checkbox" class="new-session">
+          <span>新しいセッションで開始</span>
+        </label>
+        <button type="submit" class="send">送信</button>
+      </div>
+    </form>
+
+    <!-- 直近の回答のみを表示する。新しいタスクを送るたびに中身をリセットする。 -->
+    <section class="answer-wrap" hidden>
+      <div class="answer-head">
+        <span class="answer-title">回答</span>
+      </div>
+      <div class="answer" aria-live="polite"></div>
+    </section>
+
+    <section class="stream-wrap" hidden>
+      <div class="stream-head">
+        <span class="stream-title">実行ログ</span>
+        <span class="stream-status"></span>
+      </div>
+      <div class="stream" aria-live="polite"></div>
+    </section>
+  </article>
+</template>
+
+<!-- 認証ダイアログ -->
+<dialog id="auth-dialog">
+  <div class="dialog-head">
+    <h3 id="auth-title">認証</h3>
+    <button type="button" id="auth-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="auth-body" id="auth-body"></div>
+</dialog>
+
+<!-- 履歴ダイアログ -->
+<dialog id="history-dialog">
+  <div class="dialog-head">
+    <h3 id="history-title">セッション履歴</h3>
+    <button type="button" id="history-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="dialog-body">
+    <aside id="history-list" class="history-list"></aside>
+    <div id="history-view" class="history-view">
+      <p class="hint">左の一覧からセッションを選んでください。</p>
+    </div>
+  </div>
+</dialog>
+
+<!-- Skills 一覧ダイアログ -->
+<dialog id="skills-dialog">
+  <div class="dialog-head">
+    <h3 id="skills-title">Skills</h3>
+    <button type="button" id="skills-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="skills-body" id="skills-body">
+    <p class="hint">読み込み中…</p>
+  </div>
+</dialog>
+
+<!-- コンテナ設定（docker compose）ダイアログ -->
+<dialog id="config-dialog">
+  <div class="dialog-head">
+    <h3 id="config-title">コンテナ設定</h3>
+    <button type="button" id="config-close" aria-label="閉じる">✕</button>
+  </div>
+  <div class="config-body">
+    <form id="config-form" class="config-form">
+      <label class="field">
+        <span>プロジェクト名（サービス名）</span>
+        <input type="text" name="name" placeholder="claude-project-c"
+               pattern="[a-z][a-z0-9-]{1,38}[a-z0-9]" autocomplete="off" required>
+        <small>docker-compose 上のサービス名。英小文字・数字・ハイフンのみ。追加後は変更できません。</small>
+      </label>
+      <label class="field">
+        <span>表示名</span>
+        <input type="text" name="displayName" placeholder="Project C" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>ワークスペース（ホスト側パス）</span>
+        <input type="text" name="hostPath" placeholder="${HOME}/project-c" autocomplete="off" required>
+        <small>コンテナの /workspace にバインドマウントされるホスト側フォルダ。</small>
+      </label>
+      <div class="field">
+        <span>vault（参照専用・全コンテナ共通）</span>
+        <p class="static-value mono" id="config-vault">—</p>
+      </div>
+      <label class="field">
+        <span>permissionMode</span>
+        <select name="permissionMode">
+          <option value="bypassPermissions">bypassPermissions（確認なしで実行）</option>
+          <option value="default">default（確認プロンプトが必要。非対話実行では完走しない）</option>
+          <option value="acceptEdits">acceptEdits</option>
+          <option value="plan">plan</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>allowedTools（カンマ区切り、任意）</span>
+        <input type="text" name="allowedTools" placeholder="Read, Grep, Glob" autocomplete="off">
+        <small>空欄なら制限なし。指定するとそのツールのみに制限されます。</small>
+      </label>
+
+      <div class="config-actions">
+        <button type="submit" class="send" id="config-save">保存</button>
+      </div>
+    </form>
+
+    <p class="config-pending" id="config-pending" hidden>
+      保存しただけではコンテナへ反映されません。下の「適用」で <code>docker compose up -d</code> を実行してください。
+    </p>
+
+    <div class="config-apply">
+      <label class="check">
+        <input type="checkbox" id="config-build">
+        <span>イメージを再ビルドしてから適用する（Dockerfile を変更した場合など）</span>
+      </label>
+      <button type="button" id="config-apply-btn">適用（docker compose up -d）</button>
+    </div>
+
+    <pre class="config-log" id="config-log" hidden></pre>
+  </div>
+</dialog>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
