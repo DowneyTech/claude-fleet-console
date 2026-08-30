@@ -22,8 +22,8 @@ router.get('/projects', (_req, res, next) => {
 
 router.post('/projects', (req, res, next) => {
   try {
-    const { name, displayName, hostPath, permissionMode, allowedTools, model, role } = req.body ?? {};
-    addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role });
+    const { name, displayName, hostPath, permissionMode, allowedTools, model, role, requiresApproval } = req.body ?? {};
+    addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role, requiresApproval });
     res.status(201).json(getComposeView());
   } catch (err) {
     next(err);
@@ -32,16 +32,17 @@ router.post('/projects', (req, res, next) => {
 
 router.put('/projects/:name', (req, res, next) => {
   try {
-    const { hostPath, displayName, permissionMode, allowedTools, model, role } = req.body ?? {};
+    const { hostPath, displayName, permissionMode, allowedTools, model, role, requiresApproval } = req.body ?? {};
     if (hostPath !== undefined) updateWorkspaceHostPath(req.params.name, hostPath);
     if (
       displayName !== undefined ||
       permissionMode !== undefined ||
       allowedTools !== undefined ||
       model !== undefined ||
-      role !== undefined
+      role !== undefined ||
+      requiresApproval !== undefined
     ) {
-      updateProjectMeta(req.params.name, { displayName, permissionMode, allowedTools, model, role });
+      updateProjectMeta(req.params.name, { displayName, permissionMode, allowedTools, model, role, requiresApproval });
     }
     res.json(getComposeView());
   } catch (err) {

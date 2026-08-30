@@ -36,6 +36,7 @@ const ROLE_LABEL = {
   implement: '実装',
   review: 'レビュー',
   test: 'テスト',
+  master: 'マスター',
 };
 
 // プロジェクトごとの「顔」。名前から決定的に選ぶので、再読み込みしても同じ担当が
@@ -483,6 +484,7 @@ function createCard(name) {
     character: q('.character'),
     characterFace: q('.character-face'),
     roleBadge: q('.role-badge'),
+    approvalBadge: q('.approval-badge'),
     pill: q('.pill'),
     pillText: q('.pill-text'),
     state: q('.m-state'),
@@ -649,6 +651,7 @@ function updateCard(data) {
   } else {
     els.roleBadge.hidden = true;
   }
+  els.approvalBadge.hidden = !data.requiresApproval;
 
   els.state.textContent = STATE_LABEL[data.state] ?? data.state;
   els.activity.textContent = data.busy ? '実行中' : ago(data.lastActivity);
@@ -1324,6 +1327,7 @@ async function openConfigForEdit(name, displayName) {
     configForm.elements.displayName.value = project.displayName ?? '';
     configForm.elements.hostPath.value = project.hostWorkspacePath ?? '';
     configForm.elements.role.value = project.role ?? '';
+    configForm.elements.requiresApproval.checked = Boolean(project.requiresApproval);
     configForm.elements.permissionMode.value = project.permissionMode ?? 'bypassPermissions';
     configForm.elements.allowedTools.value = (project.allowedTools ?? []).join(', ');
     configForm.elements.model.value = project.model ?? '';
@@ -1346,6 +1350,7 @@ configForm.addEventListener('submit', async (event) => {
     displayName: fd.get('displayName'),
     hostPath: fd.get('hostPath'),
     role: fd.get('role') || '',
+    requiresApproval: fd.get('requiresApproval') === 'on',
     permissionMode: fd.get('permissionMode'),
     allowedTools,
     model: fd.get('model'),
@@ -1521,6 +1526,7 @@ const pipelineDialog = document.getElementById('pipeline-dialog');
 const pipelineNewForm = document.getElementById('pipeline-new-form');
 const pipelineBoard = document.getElementById('pipeline-board');
 const pipelineDetail = document.getElementById('pipeline-detail');
+const pipelineMasterInfo = document.getElementById('pipeline-master-info');
 
 document.getElementById('pipeline-close').addEventListener('click', () => pipelineDialog.close());
 document.getElementById('open-pipeline').addEventListener('click', () => {
@@ -1538,9 +1544,16 @@ function stageInfo(stage) {
 
 async function loadPipeline() {
   try {
-    const [stagesData, ticketsData] = await Promise.all([apiPipeline('/stages'), apiPipeline('/tickets')]);
+    const [stagesData, ticketsData, master] = await Promise.all([
+      apiPipeline('/stages'),
+      apiPipeline('/tickets'),
+      apiPipeline('/master'),
+    ]);
     pipelineStages = stagesData.stages ?? [];
     pipelineTickets = ticketsData.tickets ?? [];
+    pipelineMasterInfo.textContent = master.displayName
+      ? `司令塔: ${master.displayName}（各工程の完了後に自動で進める/差し戻す/保留を判断します）`
+      : 'マスター役が未設定です（コンテナ設定で役割を「マスター」にすると、工程完了後の判断を自動化できます）';
   } catch (err) {
     pipelineBoard.textContent = '';
     pipelineBoard.appendChild(el('p', 'hint', `取得に失敗しました: ${err.message}`));
@@ -1587,7 +1600,20 @@ function renderPipelineBoard() {
   }
 }
 
-const HISTORY_KIND_LABEL = { created: '作成', sent: '送信', advanced: '工程を進めた', rejected: '差し戻し' };
+const HISTORY_KIND_LABEL = {
+  created: '作成',
+  sent: '送信',
+  advanced: '工程を進めた',
+  rejected: '差し戻し',
+  master_hold: '判断を保留',
+  master_error: '判断エラー',
+  master_paused: '自動運転を一時停止',
+  master_skipped: '自動判断をスキップ',
+  master_approval_needed: '承認待ち',
+};
+
+// ステージ遷移を伴う履歴（→ の矢印表示）と、そうでない履歴（保留・エラー等）を区別する。
+const HISTORY_TRANSITION_KINDS = new Set(['created', 'sent', 'advanced', 'rejected']);
 
 function renderPipelineArtifact(name, content) {
   if (/\.(diff|patch)$/i.test(name)) return renderDiffText(content);
@@ -1630,6 +1656,29 @@ async function renderPipelineDetail(id) {
       `現在: ${currentInfo.label}${currentInfo.displayName ? `（担当: ${currentInfo.displayName}）` : '（担当プロジェクト未設定）'}`,
     ),
   );
+
+  if (ticket.autopilot?.paused) {
+    pipelineDetail.appendChild(
+      el(
+        'p',
+        'pipeline-autopilot-paused',
+        '自動運転は一時停止中です（差し戻しが繰り返されたため）。成果物を確認し、下のボタンで手動操作すると再開します。',
+      ),
+    );
+  }
+
+  const lastHistory = ticket.history[ticket.history.length - 1];
+  if (lastHistory?.kind === 'master_approval_needed') {
+    const targetLabel = nextStage ? stageInfo(nextStage).label : '次の工程';
+    pipelineDetail.appendChild(
+      el(
+        'p',
+        'pipeline-approval-needed',
+        `マスターが「${targetLabel}」への進行を提案しています${lastHistory.note ? `（理由: ${lastHistory.note}）` : ''}。` +
+          '内容を確認し、進めてよければ下の「次の工程へ」を押してください。',
+      ),
+    );
+  }
 
   const noteInput = document.createElement('textarea');
   noteInput.className = 'pipeline-note';
@@ -1717,8 +1766,12 @@ async function renderPipelineDetail(id) {
   for (const h of [...ticket.history].reverse()) {
     const row = el('div', 'pipeline-history-row');
     const label = HISTORY_KIND_LABEL[h.kind] ?? h.kind;
+    const actorTag = h.actor === 'master' ? '（マスター）' : '';
+    const text = HISTORY_TRANSITION_KINDS.has(h.kind)
+      ? `${label}${actorTag} → ${stageInfo(h.stage).label}${h.project ? `（${h.project}）` : ''}`
+      : `${label}${actorTag}（${stageInfo(h.stage).label}）`;
     row.appendChild(el('span', 'mono', new Date(h.at).toLocaleString('ja-JP')));
-    row.appendChild(el('span', null, ` ${label} → ${stageInfo(h.stage).label}${h.project ? `（${h.project}）` : ''}`));
+    row.appendChild(el('span', null, ` ${text}`));
     if (h.note) row.appendChild(el('div', 'pipeline-history-note', h.note));
     historyBox.appendChild(row);
   }

@@ -939,6 +939,19 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 .role-badge[data-role="implement"] { background: var(--accent-soft); color: var(--accent); }
 .role-badge[data-role="review"]    { background: var(--warn-soft);   color: var(--warn); }
 .role-badge[data-role="test"]      { background: var(--danger-soft); color: var(--danger); }
+.role-badge[data-role="master"]    { background: var(--surface-2);   color: var(--text); border-color: var(--text-dim); }
+
+.approval-badge {
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  white-space: nowrap;
+}
 
 /* ---------- diff view ---------- */
 
@@ -1044,6 +1057,22 @@ dialog.wide { width: min(1180px, 96vw); }
 .pipeline-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .pipeline-detail-head h4 { margin: 0; font-size: 14.5px; }
 .pipeline-detail-meta { margin: 0; font-size: 12.5px; color: var(--text-dim); }
+.pipeline-autopilot-paused {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12.5px;
+}
+.pipeline-approval-needed {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--info-soft);
+  color: var(--info);
+  font-size: 12.5px;
+}
 .pipeline-note {
   padding: 8px 10px;
   color: var(--text);

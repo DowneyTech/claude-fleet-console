@@ -45,6 +45,7 @@
         </div>
       </div>
       <span class="role-badge" hidden></span>
+      <span class="approval-badge" hidden title="マスターの自動判断だけではこの工程へ進めません">要承認</span>
       <span class="pill" data-activity="idle"><i></i><span class="pill-text"></span></span>
     </div>
 
@@ -240,16 +241,22 @@
           <option value="implement">実装</option>
           <option value="review">レビュー</option>
           <option value="test">テスト</option>
+          <option value="master">マスター（司令塔）</option>
         </select>
         <small>
           設計→実装→レビュー→テストのどの工程を担当するかの印。「パイプライン」機能はここで
-          役割を設定したプロジェクトへ自動でタスクを送る。
+          役割を設定したプロジェクトへ自動でタスクを送る。「マスター」に設定したプロジェクトは
+          各工程の完了後に成果物を読み、進める/差し戻す/保留を自動で判断する司令塔になる。
         </small>
       </label>
       <div class="field">
         <button type="button" id="config-apply-role-preset" class="ghost">選択した役割のおすすめ設定を適用</button>
         <small>permissionMode と allowedTools を役割ごとの推奨値で置き換えます（下の「保存」を押すまで確定しません）。</small>
       </div>
+      <label class="check">
+        <input type="checkbox" name="requiresApproval">
+        <span>マスターの自動判断だけではこの工程へ進めない（人間が手動で送信するまで待つ）</span>
+      </label>
       <label class="field">
         <span>permissionMode</span>
         <select name="permissionMode">
@@ -327,6 +334,7 @@
     <button type="button" id="pipeline-close" aria-label="閉じる">✕</button>
   </div>
   <div class="pipeline-body">
+    <p class="hint" id="pipeline-master-info">読み込み中…</p>
     <form id="pipeline-new-form" class="pipeline-new-form">
       <input type="text" name="title" placeholder="新しい案件名（例: ログイン画面の改修）" autocomplete="off" required>
       <button type="submit" class="send">＋ 追加</button>

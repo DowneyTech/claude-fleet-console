@@ -45,6 +45,13 @@ export const ROLE_PRESETS = {
     permissionMode: 'acceptEdits',
     allowedTools: ['Read', 'Grep', 'Glob', 'Bash', 'Write', 'Edit'],
   },
+  master: {
+    // 各工程の成果物を読んで判断し、決定ファイルを書き出すだけの役割。
+    // コードや設計文書を直接書き換えさせないため Edit / Bash は与えない。
+    label: 'マスター（司令塔）',
+    permissionMode: 'acceptEdits',
+    allowedTools: ['Read', 'Grep', 'Glob', 'Write'],
+  },
 };
 
 export const ROLES = Object.keys(ROLE_PRESETS);
@@ -183,6 +190,7 @@ export function getComposeView() {
       allowedTools: cfg?.allowedTools ?? [],
       model: cfg?.model ?? null,
       role: cfg?.role ?? null,
+      requiresApproval: Boolean(cfg?.requiresApproval),
       registeredInDashboard: Boolean(cfg),
     });
   }
@@ -234,7 +242,7 @@ function validateRole(role) {
 }
 
 /** 新しいプロジェクトのサービスを追加し、あわせて containers.config.json にも登録する。 */
-export function addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role }) {
+export function addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role, requiresApproval }) {
   if (!validateProjectName(name)) {
     throw Object.assign(new Error('プロジェクト名は英小文字・数字・ハイフンのみ、2〜40文字で指定してください'), { status: 400 });
   }
@@ -333,12 +341,13 @@ export function addProject({ name, displayName, hostPath, permissionMode, allowe
     ...(Array.isArray(allowedTools) && allowedTools.length > 0 ? { allowedTools } : {}),
     ...(model ? { model } : {}),
     ...(role ? { role } : {}),
+    ...(requiresApproval ? { requiresApproval: true } : {}),
   });
   writeFileSync(configPath, `${JSON.stringify(configs, null, 2)}\n`);
 }
 
-/** displayName / permissionMode / allowedTools / model / role を containers.config.json 側で更新する。 */
-export function updateProjectMeta(name, { displayName, permissionMode, allowedTools, model, role }) {
+/** displayName / permissionMode / allowedTools / model / role / requiresApproval を containers.config.json 側で更新する。 */
+export function updateProjectMeta(name, { displayName, permissionMode, allowedTools, model, role, requiresApproval }) {
   if (permissionMode && !PERMISSION_MODES.includes(permissionMode)) {
     throw Object.assign(new Error('permissionMode が不正です'), { status: 400 });
   }
@@ -367,6 +376,10 @@ export function updateProjectMeta(name, { displayName, permissionMode, allowedTo
   if (role !== undefined) {
     if (role) entry.role = role;
     else delete entry.role;
+  }
+  if (requiresApproval !== undefined) {
+    if (requiresApproval) entry.requiresApproval = true;
+    else delete entry.requiresApproval;
   }
 
   writeFileSync(configPath, `${JSON.stringify(configs, null, 2)}\n`);

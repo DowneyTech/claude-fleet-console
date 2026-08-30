@@ -4,6 +4,7 @@ import {
   createTicket,
   getTicket,
   listTickets,
+  masterInfo,
   rejectTicket,
   removeTicket,
   sendCurrentStage,
@@ -19,6 +20,8 @@ function handleStoreError(err, res, next) {
 }
 
 router.get('/stages', (_req, res) => res.json({ stages: stagesInfo() }));
+
+router.get('/master', (_req, res) => res.json(masterInfo()));
 
 router.get('/tickets', (_req, res) => res.json({ tickets: listTickets() }));
 

@@ -100,15 +100,23 @@ export async function latestSession(name, workspacePath) {
 
 /**
  * タスク投入に使うセッション ID を決める。
- *   ① メモリ上の既知 ID が実ファイルとして存在すれば --resume で流用
- *   ② 無ければコンテナ内の最新 jsonl（人間が手動対話したもの）を --resume
- *   ③ それも無ければ新規 UUID を発行して --session-id で開始
- * newSession が真なら ①② を飛ばして常に ③。
+ *   ① resumeId が指定され、実ファイルとして存在すれば必ずそれを --resume する
+ *   ② 指定が無ければメモリ上の既知 ID（＝コンテナの「現在のセッション」）を --resume
+ *   ③ それも無ければコンテナ内の最新 jsonl（人間が手動対話したもの）を --resume
+ *   ④ どれも無ければ新規 UUID を発行して --session-id で開始
+ * newSession が真なら ①〜③ を飛ばして常に ④。
  *
- * ① で実ファイルを確認するのは、前回のタスクがセッション作成前に失敗した場合や
- * ボリュームを消した場合に、存在しない ID を resume して連続失敗するのを防ぐため。
+ * resumeId は「このコンテナの現在のセッション」という単一のグローバルな状態に
+ * 頼らず、呼び出し側（パイプラインの各チケット×工程など）が「前回自分が
+ * 使ったセッション」を名指しで再開したいときに使う。複数の作業（チケット）が
+ * 同じコンテナ＝同じ役割を使い回す場合、単なる「現在のセッション」だけでは
+ * 別の作業の文脈を resume してしまう事故が起きるため。
+ *
+ * ①③ で実ファイルを確認するのは、前回のタスクがセッション作成前に失敗した場合や
+ * ボリュームを消した場合に、存在しない ID を resume して連続失敗する
+ * （resumeId の場合は無関係な別セッションを誤って resume する）のを防ぐため。
  */
-export async function resolveSession(name, workspacePath, { newSession = false } = {}) {
+export async function resolveSession(name, workspacePath, { newSession = false, resumeId = null } = {}) {
   if (newSession) {
     const id = randomUUID();
     current.set(name, id);
@@ -116,8 +124,21 @@ export async function resolveSession(name, workspacePath, { newSession = false }
   }
 
   const sessions = await listSessions(name, workspacePath).catch(() => []);
-  const known = current.get(name);
 
+  if (resumeId) {
+    if (sessions.some((s) => s.id === resumeId)) {
+      current.set(name, resumeId);
+      return { id: resumeId, mode: 'resume' };
+    }
+    // 指定されたセッションが実ファイルとして残っていない（消えた等）場合、
+    // 無関係な別セッション（現在のセッションや最新ファイル）を resume してしまうと
+    // 別の作業の文脈が混ざる事故になるので、素直に新規発行へフォールバックする。
+    const id = randomUUID();
+    current.set(name, id);
+    return { id, mode: 'new' };
+  }
+
+  const known = current.get(name);
   if (known && sessions.some((s) => s.id === known)) {
     return { id: known, mode: 'resume' };
   }

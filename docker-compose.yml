@@ -49,6 +49,21 @@ services:
       - ${HOME}/Project:/vault:ro
       - ${HOME}/Project/.fleet-handoff:/handoff
 
+  claude-project-master:
+    build: .
+    container_name: claude-project-master
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    volumes:
+      - claude-project-master-config:/home/claude/.claude
+      - ${HOME}/project-master:/workspace
+      - ${HOME}/Project:/vault:ro
+      # 各工程の成果物を読み、判断結果（decision-*.json）を書き出すための共有フォルダ。
+      - ${HOME}/Project/.fleet-handoff:/handoff
+
   manager:
     build: ./manager
     container_name: claude-manager
@@ -83,6 +98,7 @@ services:
       - claude-project-b
       - claude-project-c
       - claude-project-d
+      - claude-project-master
 
   claude-project-c:
     build: .
@@ -103,3 +119,4 @@ volumes:
   claude-project-b-config:
   claude-project-c-config:
   claude-project-d-config:
+  claude-project-master-config:

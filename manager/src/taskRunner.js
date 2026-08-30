@@ -28,8 +28,16 @@ export function getQueue(name) {
   return queues.get(name) ?? [];
 }
 
-function queueTask(cfg, { prompt, newSession, model }) {
-  const item = { id: randomUUID(), prompt, newSession: Boolean(newSession), model: model || null, queuedAt: Date.now() };
+function queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId }) {
+  const item = {
+    id: randomUUID(),
+    prompt,
+    newSession: Boolean(newSession),
+    model: model || null,
+    onDone: onDone || null,
+    resumeSessionId: resumeSessionId || null,
+    queuedAt: Date.now(),
+  };
   const q = queues.get(cfg.name) ?? [];
   q.push(item);
   queues.set(cfg.name, q);
@@ -55,7 +63,13 @@ function startNextQueued(cfg) {
   if (!q || q.length === 0) return;
   const next = q.shift();
   const freshCfg = getContainerConfig(cfg.name) ?? cfg;
-  startTask(freshCfg, { prompt: next.prompt, newSession: next.newSession, model: next.model }).catch((err) => {
+  startTask(freshCfg, {
+    prompt: next.prompt,
+    newSession: next.newSession,
+    model: next.model,
+    onDone: next.onDone,
+    resumeSessionId: next.resumeSessionId,
+  }).catch((err) => {
     // busy チェックとキュー投入は同期的に行っているため通常は起きないはずだが、
     // 念のため握りつぶさずログには残す。
     console.error(`[taskRunner] キュー投入タスクの起動に失敗しました (${cfg.name}): ${err.message}`);
@@ -122,6 +136,17 @@ function finish(task, { exitCode, error }) {
     res.end();
   }
   task.subscribers.clear();
+
+  // パイプライン機能（マスターによる自動判断）が「このタスクが本当に終わった」
+  // タイミングをフックするための出口。呼び出し側の都合（ファイル書き込み・
+  // 次タスク投入など）で例外を投げても、タスク自体の終了処理は壊さない。
+  if (task.onDone) {
+    try {
+      task.onDone(task);
+    } catch (err) {
+      console.error(`[taskRunner] onDone コールバックが例外を投げました (${task.container}): ${err.message}`);
+    }
+  }
 }
 
 /**
@@ -131,10 +156,13 @@ function finish(task, { exitCode, error }) {
  * `{ queued: true, item }` を返す（呼び出し側が投入扱いにする）。偽なら例外を投げる
  * （呼び出し側が 409 にする）。現在のタスクが終わるたびにキューの先頭が自動起動される。
  */
-export async function startTask(cfg, { prompt, newSession = false, model = null, enqueueIfBusy = false }) {
+export async function startTask(
+  cfg,
+  { prompt, newSession = false, model = null, enqueueIfBusy = false, onDone = null, resumeSessionId = null },
+) {
   if (isBusy(cfg.name)) {
     if (enqueueIfBusy) {
-      return { queued: true, item: queueTask(cfg, { prompt, newSession, model }) };
+      return { queued: true, item: queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId }) };
     }
     const err = new Error('このコンテナでは既にタスクが実行中です');
     err.status = 409;
@@ -161,6 +189,7 @@ export async function startTask(cfg, { prompt, newSession = false, model = null,
     nextSeq: 0,
     dropped: 0,
     subscribers: new Set(),
+    onDone,
   };
   // await を挟む前に枠を確保する。セッション解決を待ってから登録すると、
   // 同時に来たリクエストが両方とも isBusy を通過して二重起動する。
@@ -168,7 +197,7 @@ export async function startTask(cfg, { prompt, newSession = false, model = null,
 
   let session;
   try {
-    session = await resolveSession(cfg.name, cfg.workspacePath, { newSession });
+    session = await resolveSession(cfg.name, cfg.workspacePath, { newSession, resumeId: resumeSessionId });
   } catch (err) {
     // 枠を握ったまま失敗すると、そのコンテナが永久に busy になる。
     finish(task, { exitCode: null, error: err.message });

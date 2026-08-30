@@ -12,7 +12,8 @@
     "displayName": "Project B",
     "workspacePath": "/workspace",
     "permissionMode": "bypassPermissions",
-    "role": "implement"
+    "role": "implement",
+    "requiresApproval": true
   },
   {
     "name": "claude-project-c",
@@ -33,5 +34,14 @@
     "permissionMode": "acceptEdits",
     "allowedTools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"],
     "role": "test"
+  },
+  {
+    "name": "claude-project-master",
+    "displayName": "Project Master",
+    "workspacePath": "/workspace",
+    "permissionMode": "acceptEdits",
+    "allowedTools": ["Read", "Grep", "Glob", "Write"],
+    "model": "opus",
+    "role": "master"
   }
 ]

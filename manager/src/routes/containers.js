@@ -69,6 +69,7 @@ async function describe(cfg, composeProjects) {
     permissionMode: cfg.permissionMode,
     model: cfg.model,
     role: cfg.role,
+    requiresApproval: cfg.requiresApproval,
     hostPaths,
     state,
     activity: classify({ state, busy, lastActivity }),
