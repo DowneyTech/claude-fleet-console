@@ -104,6 +104,27 @@ button:focus-visible, textarea:focus-visible, input:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+/* ---------- master panel（司令塔の固定枠） ---------- */
+
+.master-panel {
+  padding: 18px 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.master-panel-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.master-panel-empty { margin: 0 0 18px; font-size: 12.5px; }
+.master-panel .card { max-width: 480px; margin-bottom: 18px; }
+
 /* ---------- grid & cards ---------- */
 
 .grid {

@@ -1,15 +1,22 @@
 [
   {
     "name": "claude-project-a",
-    "displayName": "Project A",
+    "displayName": "設計担当",
     "workspacePath": "/workspace",
     "permissionMode": "acceptEdits",
-    "allowedTools": ["Read", "Grep", "Glob", "Write", "Edit", "WebSearch"],
+    "allowedTools": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Write",
+      "Edit",
+      "WebSearch"
+    ],
     "role": "design"
   },
   {
     "name": "claude-project-b",
-    "displayName": "Project B",
+    "displayName": "実装担当",
     "workspacePath": "/workspace",
     "permissionMode": "bypassPermissions",
     "role": "implement",
@@ -17,7 +24,7 @@
   },
   {
     "name": "claude-project-c",
-    "displayName": "Project C (renamed)",
+    "displayName": "レビュー担当",
     "workspacePath": "/workspace",
     "permissionMode": "plan",
     "allowedTools": [
@@ -29,18 +36,30 @@
   },
   {
     "name": "claude-project-d",
-    "displayName": "Project D",
+    "displayName": "テスト担当",
     "workspacePath": "/workspace",
     "permissionMode": "acceptEdits",
-    "allowedTools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit"],
+    "allowedTools": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash",
+      "Write",
+      "Edit"
+    ],
     "role": "test"
   },
   {
     "name": "claude-project-master",
-    "displayName": "Project Master",
+    "displayName": "マスター",
     "workspacePath": "/workspace",
     "permissionMode": "acceptEdits",
-    "allowedTools": ["Read", "Grep", "Glob", "Write"],
+    "allowedTools": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Write"
+    ],
     "model": "opus",
     "role": "master"
   }

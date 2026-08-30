@@ -27,6 +27,15 @@
   UI から投げたタスクは確認なしにコンテナ内でコマンド実行・ファイル編集を行います。
 </div>
 
+<!-- role: master のプロジェクトは、他の作業工程のカードと混ざらないよう
+     常に画面上部の固定枠に表示する（存在しない場合はその旨のヒントを出す）。 -->
+<section class="master-panel" id="master-panel">
+  <h2 class="master-panel-title">司令塔（マスター）</h2>
+  <p class="hint master-panel-empty" id="master-panel-empty">
+    マスター役のプロジェクトが未設定です。プロジェクトの設定で役割を「マスター」にすると、ここに固定表示されます。
+  </p>
+</section>
+
 <main id="grid" class="grid"></main>
 
 <p class="empty" id="empty" hidden>containers.config.json に登録されたコンテナがありません。</p>

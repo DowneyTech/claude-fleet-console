@@ -10,6 +10,8 @@ const summaryEl = document.getElementById('summary');
 const pollEl = document.getElementById('poll-state');
 const bannerEl = document.getElementById('banner');
 const emptyEl = document.getElementById('empty');
+const masterPanel = document.getElementById('master-panel');
+const masterPanelEmpty = document.getElementById('master-panel-empty');
 
 const cards = new Map();   // name -> { root, els }
 const streams = new Map(); // name -> EventSource
@@ -479,7 +481,7 @@ function openStream(name) {
 
 /* -------------------------------- cards -------------------------------- */
 
-function createCard(name) {
+function createCard(name, role) {
   const root = template.content.firstElementChild.cloneNode(true);
   const q = (sel) => root.querySelector(sel);
 
@@ -600,10 +602,17 @@ function createCard(name) {
     }
   });
 
-  grid.appendChild(root);
+  // role: master のプロジェクトだけは通常の作業工程カードと混ざらないよう、
+  // 画面上部の固定枠（master-panel）に置く。それ以外は今までどおり grid。
+  containerFor(role).appendChild(root);
   const card = { root, els };
   cards.set(name, card);
   return card;
+}
+
+/** カードの置き先。master 役だけ画面上部の固定枠、それ以外は通常のグリッド。 */
+function containerFor(role) {
+  return role === 'master' ? masterPanel : grid;
 }
 
 /** busy なコンテナに積まれた、実行待ちタスクの一覧。 */
@@ -639,8 +648,13 @@ function renderQueue(card, name, queue) {
 }
 
 function updateCard(data) {
-  const card = cards.get(data.name) ?? createCard(data.name);
+  const card = cards.get(data.name) ?? createCard(data.name, data.role);
   const { els } = card;
+
+  // role がライブで変わることは稀だが、変わった場合は次回更新時に正しい枠へ
+  // 移す（appendChild は既存ノードを新しい親へ再アタッチするだけなので安全）。
+  const expectedContainer = containerFor(data.role);
+  if (card.root.parentElement !== expectedContainer) expectedContainer.appendChild(card.root);
 
   els.title.textContent = data.displayName;
   els.name.textContent = data.name;
@@ -1911,6 +1925,7 @@ async function refresh() {
 
     emptyEl.hidden = containers.length > 0;
     bannerEl.hidden = !containers.some((c) => c.permissionMode === 'bypassPermissions');
+    masterPanelEmpty.hidden = containers.some((c) => c.role === 'master');
 
     for (const container of containers) updateCard(container);
 
