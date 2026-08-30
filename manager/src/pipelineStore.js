@@ -32,6 +32,11 @@ const legacyPipelinePath = existsSync(mountedDir)
   ? path.join(mountedDir, 'pipeline.json')
   : path.join(appRoot, 'pipeline.json');
 
+// ticketFilePath（id 検証）・saveTicket（tmp+rename の原子的書き込み）に
+// 乗っかりたいため、この関数の定義はここに置くが「呼び出し」自体はそれらの
+// 定義が済んだ後（loadAllTickets の直後）まで遅らせる。const/関数はファイルの
+// 上から順に評価されるため、ここで即座に呼ぶと TICKET_ID_RE 等の初期化前
+// 参照でエラーになる。
 function migrateLegacyPipelineFileIfNeeded() {
   if (!existsSync(legacyPipelinePath)) return;
   let list;
@@ -41,12 +46,13 @@ function migrateLegacyPipelineFileIfNeeded() {
   } catch {
     return; // 壊れたファイルは移行しようがないので触らずスキップする。
   }
-  if (list.length > 0) {
-    mkdirSync(ticketsDir, { recursive: true });
-    for (const ticket of list) {
-      if (!ticket?.id) continue;
-      const dest = path.join(ticketsDir, `${ticket.id}.json`);
-      if (!existsSync(dest)) writeFileSync(dest, `${JSON.stringify(ticket, null, 2)}\n`);
+  for (const ticket of list) {
+    try {
+      // ticketFilePath が id の形式検証も兼ねる（不正な id はここで例外になる）。
+      const dest = ticketFilePath(ticket?.id);
+      if (!existsSync(dest)) saveTicket(ticket); // tmp+rename で書くため書きかけを掴まれない。
+    } catch (err) {
+      console.error(`[pipelineStore] チケットの移行に失敗しました（id: ${ticket?.id}）: ${err.message}`);
     }
   }
   try {
@@ -55,7 +61,6 @@ function migrateLegacyPipelineFileIfNeeded() {
     console.error(`[pipelineStore] 旧 pipeline.json の退避に失敗しました: ${err.message}`);
   }
 }
-migrateLegacyPipelineFileIfNeeded();
 
 // 設計 → 実装 → レビュー → テスト → 完了、の固定フロー。
 // containers.config.json の role がこの stage 名と一致するプロジェクトへタスクを送る。
@@ -145,7 +150,18 @@ function withTicketLock(id, fn) {
   return run;
 }
 
+// handoffStore.js の TICKET_ID_RE と同じ意図: id はチケット作成時に自分で発行した
+// UUID のはずだが、ルートハンドラ経由で外部（req.params.id）からもそのまま渡って
+// くるため、ファイルパスへ組み立てる前に必ず検証する。検証なしに
+// path.join(ticketsDir, `${id}.json`) すると、id に "../" を含めることで
+// ticketsDir の外（containers.config.json 等）を読み書き・削除できてしまう
+// （パストラバーサル）。
+const TICKET_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 function ticketFilePath(id) {
+  if (typeof id !== 'string' || !TICKET_ID_RE.test(id)) {
+    throw Object.assign(new Error('invalid ticket id'), { status: 400 });
+  }
   return path.join(ticketsDir, `${id}.json`);
 }
 
@@ -184,11 +200,19 @@ function loadAllTickets() {
   for (const name of readdirSync(ticketsDir)) {
     if (!name.endsWith('.json')) continue;
     const id = name.slice(0, -'.json'.length);
+    // 想定外のファイル名（手動で置かれた/破損したファイル等）は ticketFilePath が
+    // 例外を投げてしまうので、一覧取得全体を巻き込んで落とさないよう先に弾く。
+    if (!TICKET_ID_RE.test(id)) continue;
     const ticket = loadTicket(id);
     if (ticket) tickets.push(ticket);
   }
+  // readdirSync の返す順序はファイルシステム依存で作成順とは限らない。
+  // 旧実装（単一配列への push）は常に作成順だったため、それに合わせて並べ直す。
+  tickets.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
   return tickets;
 }
+
+migrateLegacyPipelineFileIfNeeded();
 
 /** その工程を担当するプロジェクト（containers.config.json の role が一致するもの）。 */
 function projectForStage(stage) {

@@ -49,6 +49,42 @@ test('getTicket は未登録IDで404相当のエラーを投げる', () => {
   assert.throws(() => getTicket('00000000-0000-0000-0000-000000000000'), (err) => err.status === 404);
 });
 
+test('セキュリティ回帰: id にパストラバーサルを仕込んでも tickets/ の外を読めない（400）', () => {
+  // tickets/ の外側（scratch 直下）に機密ファイルを模したファイルを置く。
+  // ticketFilePath の検証が無いと path.join(ticketsDir, `${id}.json`) が
+  // これを指してしまう（containers.config.json 等が実例）。
+  const outsideFile = path.join(scratch, 'containers.config');
+  writeFileSync(outsideFile, JSON.stringify({ secret: 'must-not-leak' }));
+
+  assert.throws(
+    () => getTicket('../containers.config'),
+    (err) => err.status === 400,
+  );
+});
+
+test('セキュリティ回帰: id にパストラバーサルを仕込んでも removeTicket は外のファイルを消せない（400）', async () => {
+  const outsideFile = path.join(scratch, 'do-not-delete.json');
+  writeFileSync(outsideFile, JSON.stringify({ keep: true }));
+
+  await assert.rejects(() => removeTicket('../do-not-delete'), (err) => err.status === 400);
+
+  const { existsSync, readFileSync } = await import('node:fs');
+  assert.equal(existsSync(outsideFile), true);
+  assert.deepEqual(JSON.parse(readFileSync(outsideFile, 'utf8')), { keep: true });
+});
+
+test('listTickets は作成順（createdAt 昇順）で返す', async () => {
+  const first = await createTicket({ title: '先に作った方' });
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  const second = await createTicket({ title: '後に作った方' });
+
+  const ids = listTickets().map((t) => t.id);
+  assert.ok(ids.indexOf(first.id) < ids.indexOf(second.id));
+
+  await removeTicket(first.id);
+  await removeTicket(second.id);
+});
+
 test('removeTicket 後は listTickets/getTicket から消える', async () => {
   const ticket = await createTicket({ title: 'チケットB' });
   await removeTicket(ticket.id);

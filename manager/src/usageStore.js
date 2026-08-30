@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -72,7 +72,10 @@ let startedAt = persisted.startedAt;
 
 /**
  * totals / ticketTotals をディスクへ書き戻す。呼び出し頻度はタスク完了時のみ
- * （高々分に数回程度）なので、都度同期書き込みで十分。
+ * （高々分に数回程度）なので、都度同期書き込みで十分。一時ファイルへ書いてから
+ * rename する（pipelineStore.js の saveTicket と同じ理由: 書き込み途中で
+ * プロセスが落ちたり、その瞬間を別プロセスが読んだりしても、壊れた/欠けた
+ * JSON を掴ませない）。
  */
 function persist() {
   const data = {
@@ -80,8 +83,10 @@ function persist() {
     ticketTotals: Object.fromEntries(ticketTotals),
     startedAt,
   };
+  const tmp = `${usagePath}.tmp-${process.pid}-${Date.now()}`;
   try {
-    writeFileSync(usagePath, `${JSON.stringify(data, null, 2)}\n`);
+    writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`);
+    renameSync(tmp, usagePath);
   } catch (err) {
     console.error(`[usageStore] 使用量の永続化に失敗しました: ${err.message}`);
   }
