@@ -1,7 +1,7 @@
 services:
-  claude-project-a:
+  claude-project-design:
     build: .
-    container_name: claude-project-a
+    container_name: claude-project-design
     stdin_open: true
     tty: true
     working_dir: /workspace
@@ -10,8 +10,12 @@ services:
     command: ["tail", "-f", "/dev/null"]
     restart: unless-stopped
     volumes:
-      - claude-project-a-config:/home/claude/.claude
-      - ${HOME}/project-a:/workspace
+      - claude-project-design-config:/home/claude/.claude
+      # workspaces/ 配下はこのリポジトリに含めている（.gitkeep で空フォルダを追跡）。
+      # 相対パスにしないのは、manager がコンテナ内から `docker compose` を呼ぶとき
+      # 自分の /compose-project という見え方を基準に解決してしまい、ホストに
+      # 実在しないパスをバインドしようとするため（下の manager サービスの説明を参照）。
+      - /Users/kinchan/Project/claude-containers/workspaces/design:/workspace
       # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
       # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
       - ${HOME}/Project:/vault:ro
@@ -19,33 +23,33 @@ services:
       # 全プロジェクトコンテナ + manager 自身にも同じホストパスをマウントする。
       - ${HOME}/Project/.fleet-handoff:/handoff
 
-  claude-project-b:
+  claude-project-implement:
     build: .
-    container_name: claude-project-b
+    container_name: claude-project-implement
     stdin_open: true
     tty: true
     working_dir: /workspace
     command: ["tail", "-f", "/dev/null"]
     restart: unless-stopped
     volumes:
-      - claude-project-b-config:/home/claude/.claude
-      - ${HOME}/project-b:/workspace
+      - claude-project-implement-config:/home/claude/.claude
+      - /Users/kinchan/Project/claude-containers/workspaces/implement:/workspace
       # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
       # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
       - ${HOME}/Project:/vault:ro
       - ${HOME}/Project/.fleet-handoff:/handoff
 
-  claude-project-d:
+  claude-project-test:
     build: .
-    container_name: claude-project-d
+    container_name: claude-project-test
     stdin_open: true
     tty: true
     working_dir: /workspace
     command: ["tail", "-f", "/dev/null"]
     restart: unless-stopped
     volumes:
-      - claude-project-d-config:/home/claude/.claude
-      - ${HOME}/project-d:/workspace
+      - claude-project-test-config:/home/claude/.claude
+      - /Users/kinchan/Project/claude-containers/workspaces/test:/workspace
       - ${HOME}/Project:/vault:ro
       - ${HOME}/Project/.fleet-handoff:/handoff
 
@@ -59,7 +63,7 @@ services:
     restart: unless-stopped
     volumes:
       - claude-project-master-config:/home/claude/.claude
-      - ${HOME}/project-master:/workspace
+      - /Users/kinchan/Project/claude-containers/workspaces/master:/workspace
       - ${HOME}/Project:/vault:ro
       # 各工程の成果物を読み、判断結果（decision-*.json）を書き出すための共有フォルダ。
       - ${HOME}/Project/.fleet-handoff:/handoff
@@ -97,29 +101,29 @@ services:
       # 各コンテナが停止していても handoff 成果物を fs で直接読み書きできるようにする。
       - ${HOME}/Project/.fleet-handoff:/handoff
     depends_on:
-      - claude-project-a
-      - claude-project-b
-      - claude-project-c
-      - claude-project-d
+      - claude-project-design
+      - claude-project-implement
+      - claude-project-review
+      - claude-project-test
       - claude-project-master
 
-  claude-project-c:
+  claude-project-review:
     build: .
-    container_name: claude-project-c
+    container_name: claude-project-review
     stdin_open: true
     tty: true
     working_dir: /workspace
     command: ["tail", "-f", "/dev/null"]
     restart: unless-stopped
     volumes:
-      - claude-project-c-config:/home/claude/.claude
-      - ${HOME}/project-c:/workspace
+      - claude-project-review-config:/home/claude/.claude
+      - /Users/kinchan/Project/claude-containers/workspaces/review:/workspace
       - ${HOME}/Project:/vault:ro
       - ${HOME}/Project/.fleet-handoff:/handoff
 
 volumes:
-  claude-project-a-config:
-  claude-project-b-config:
-  claude-project-c-config:
-  claude-project-d-config:
+  claude-project-design-config:
+  claude-project-implement-config:
+  claude-project-review-config:
+  claude-project-test-config:
   claude-project-master-config:

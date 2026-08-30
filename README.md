@@ -11,6 +11,7 @@ Claude Code CLI を役割ごとに独立した Docker コンテナ上で実行�
 - [クイックスタート](#クイックスタート)
 - [ダッシュボードの基本操作](#ダッシュボードの基本操作)
 - [パイプライン機能（設計 → 実装 → レビュー → テスト）](#パイプライン機能設計--実装--レビュー--テスト)
+- [使用例](#使用例)
 - [Skills（SKILL.md）テンプレート](#skillsskillmdテンプレート)
 - [プロンプトテンプレート・差分表示](#プロンプトテンプレート差分表示)
 - [初回ログイン](#初回ログイン)
@@ -23,9 +24,10 @@ Claude Code CLI を役割ごとに独立した Docker コンテナ上で実行�
 ## 構成
 
 - `Dockerfile` — `node:20-alpine` をベースに、Claude Code CLI (`@anthropic-ai/claude-code`) と `git` / `curl` / `bash` / `python3` / `go` などの開発ツールを導入したイメージ定義。非rootユーザー `claude` で実行されます。
-- `docker-compose.yml` — 役割ごとのコンテナ定義（`claude-project-a` 〜 `d`、`claude-project-master`）と、管理UI の `manager` サービス。
+- `docker-compose.yml` — 役割ごとのコンテナ定義（`claude-project-design` / `implement` / `review` / `test` / `master`）と、管理UI の `manager` サービス。
 - `manager/containers.config.json` — 各コンテナの表示名・権限モード・役割 (`role`) などをダッシュボードUI と紐づける設定ファイル。
 - `manager/` — 管理ダッシュボード（Node.js + Express）。`http://127.0.0.1:4590` で待ち受けます。
+- `workspaces/design/`, `implement/`, `review/`, `test/`, `master/` — 各役割の `/workspace`（作業ディレクトリ）としてバインドマウントされるフォルダ。リポジトリに含まれているため、クローン直後の `docker compose up -d` だけで動きます（中身は `.gitkeep` のみの空フォルダで、実際の作業内容はここに書き込まれていきます）。
 
 ### アーキテクチャ
 
@@ -184,6 +186,64 @@ environment:
 
 チケット詳細画面に、そのチケットが消費した累計コスト・トークン数・タスク数が表示されます（マスターの判断も含めて合算されます）。マスターに自動で複数工程を回させると、1件のチケットで複数コンテナへ実タスクが連鎖するため、その分の実使用量が発生する点に注意してください。
 
+## 使用例
+
+### シナリオ: 「ログインフォームにパスワード強度チェックを追加する」
+
+役割は [パイプライン機能](#パイプライン機能設計--実装--レビュー--テスト) の手順どおり設定済み（`claude-project-design`=design、`claude-project-implement`=implement、`claude-project-review`=review、`claude-project-test`=test、`claude-project-master`=master、`claude-project-implement` は `requiresApproval` 有効）とします。
+
+1. **チケット作成** — パイプライン画面で「ログインフォームにパスワード強度チェックを追加」という案件名で追加します。チケットは「設計」列に作られます。
+
+2. **設計 → マスター判断** — 「設計へ送信」を押すと、`claude-project-design` へ次のような指示が自動で組み立てられて送られます。
+
+   ```
+   パイプライン案件「ログインフォームにパスワード強度チェックを追加」（id: 3f2a...）の設計工程です。
+   関連ファイルは /handoff/3f2a.../ にあります。まず `ls /handoff/3f2a.../` で何があるか確認してください。
+   設計内容（要件・方針・懸念点）をまとめてください。
+   完了したら、その内容を /handoff/3f2a.../design.md に書き出してください。
+   ```
+
+   完了すると `design.md` に設計方針（例: 「8文字以上・大文字小文字・数字を混在必須」）が書き出され、マスターが自動で読みに行き、`decision-design.json` に次のように書き出します。
+
+   ```json
+   { "action": "ADVANCE", "reason": "design.md に入力チェックの方針が明記されており、実装に進めてよい" }
+   ```
+
+   manager がこれを読み取り、チケットは自動で「実装」列へ進みます。
+
+3. **実装 → 承認待ち** — 実装工程は `requiresApproval` を有効にしてあるので、マスターが ADVANCE と判断しても自動では送信されず、チケット詳細に「承認待ち」と表示されます。`design.md` の内容を確認し、問題なければ「次の工程へ」を手動で押します（人間がボタンを押すこと自体が承認）。実装が完了すると `implement.md` と `patch.diff` が書き出されます。
+
+4. **レビューで差し戻し** — レビュー工程（`plan` モードなので自分ではコードを編集しない）が `patch.diff` を確認し、「エラーメッセージが英語のみでUIの他の文言と合っていない」と `review.md` に指摘を書きます。マスターはこれを読み取り、
+
+   ```json
+   { "action": "REJECT", "toStage": "implement", "reason": "review.md にエラーメッセージの文言不一致の指摘があるため実装へ差し戻す" }
+   ```
+
+   と判断します。チケットは自動で「実装」列へ戻り、差し戻し回数が1回とカウントされます（既定では3回連続で自動運転が一時停止します）。
+
+5. **再実装 → テスト → 完了** — 実装が指摘を直して `implement.md` を更新すると、再びレビュー（今度は LGTM）→ テスト（`test.md` に結果を記録）と自動で進み、最終的に「完了」列へ移動します。
+
+各工程の指示文・マスターの判断はすべてチケット詳細画面の「履歴」と「成果物」から確認できます。
+
+### curl でチケットを操作する（スクリプト連携）
+
+UI を介さず API を直接叩くこともできます。ミューテーション系リクエストには `X-Fleet-Console: 1` ヘッダーが必要です（[セキュリティ上の注意](#セキュリティ上の注意)参照）。
+
+```bash
+# チケットを作成（レスポンスの id を控える）
+curl -s -X POST http://127.0.0.1:4590/api/pipeline/tickets \
+  -H 'Content-Type: application/json' -H 'X-Fleet-Console: 1' \
+  -d '{"title":"ログインフォームにパスワード強度チェックを追加"}'
+
+# 設計工程へ送信
+curl -s -X POST http://127.0.0.1:4590/api/pipeline/tickets/<チケットID>/send \
+  -H 'Content-Type: application/json' -H 'X-Fleet-Console: 1' \
+  -d '{"note":"パスワードは8文字以上、大文字・数字を含む方針で"}'
+
+# チケットの現在の状態・履歴を確認
+curl -s -H 'X-Fleet-Console: 1' http://127.0.0.1:4590/api/pipeline/tickets/<チケットID>
+```
+
 ## Skills（SKILL.md）テンプレート
 
 各コンテナの「Skills」ダイアログから、そのプロジェクト固有の `SKILL.md` を作成・上書きできます。「役割テンプレートから挿入」で、設計・実装・レビュー・テスト・マスターそれぞれの観点をまとめた叩き台を挿入できます（内容は保存前に自由に編集できます）。役割特化の精度を上げたい場合は、まずここを実際の運用に合わせて書き換えることをおすすめします。
@@ -206,7 +266,7 @@ Claude Code の認証はコンテナごとの名前付きボリュームに保�
 CLI から行う場合は次のとおりです。
 
 ```bash
-docker compose exec claude-project-a claude auth login
+docker compose exec claude-project-design claude auth login
 ```
 
 ## 使用量・レート上限
@@ -224,26 +284,26 @@ docker compose exec claude-project-a claude auth login
 - **実装工程は既定で `bypassPermissions` です。** UI やパイプラインからプロンプトが投げられた瞬間、確認なしにコンテナ内でコマンド実行・ファイル編集が行われます。コンテナが唯一の隔離境界です。ツールを制限したい場合は `manager/containers.config.json` の各エントリに `allowedTools` を指定してください。
 
   ```json
-  { "name": "claude-project-b", "allowedTools": ["Read", "Grep", "Glob"] }
+  { "name": "claude-project-implement", "allowedTools": ["Read", "Grep", "Glob"] }
   ```
 
 - **`/vault` は全コンテナで共有された読み取り専用フォルダ、`/handoff` は全チケット共有の読み書き可能フォルダです。** `/vault` はホストの `~/Project` 配下を読み取れますが `:ro` のため書き込みはできません（**この `:ro` を外してはいけません**）。`/handoff` は書き込み可能なので、あるチケットの成果物に紛れ込んだ内容（プロンプトインジェクション）が、理屈の上では別チケットのファイルに影響しうる余地が残っています。外部の未信頼なコンテンツ（Web検索結果など）を扱う設計工程を使う場合は特に注意してください。
 - **manager はレート上限の取得のため、各コンテナの OAuth access token を読み、Anthropic の API へ直接送信します。** token 自体はコンテナ内の `.credentials.json` から都度読み直すだけで、manager 側での保存・ログ出力・リフレッシュは行いません。
-- **UI 操作中に同じコンテナへ手動で介入しないでください。** manager が `--resume` で書き込み中のセッションを `docker compose exec claude-project-a claude` で開くと競合する可能性があります。
+- **UI 操作中に同じコンテナへ手動で介入しないでください。** manager が `--resume` で書き込み中のセッションを `docker compose exec claude-project-design claude` で開くと競合する可能性があります。
 
 ## 新しいプロジェクトを追加する
 
 ヘッダーの「＋ プロジェクト追加」から、プロジェクト名・ホスト側パス・役割・権限設定を指定して追加できます。保存後に「適用（docker compose up -d）」を押すと、`docker-compose.yml` と `manager/containers.config.json` の両方が更新され、コンテナが起動します。
 
-手動で `docker-compose.yml` を編集する場合は、既存のサービス定義（`claude-project-a` など）を参考に、`/vault` と `/handoff` のマウントを含めてコピーしてください。
+手動で `docker-compose.yml` を編集する場合は、既存のサービス定義（`claude-project-design` など）を参考に、`/vault` と `/handoff` のマウントを含めてコピーしてください。
 
 ## 設定の永続化
 
-各プロジェクトの Claude Code 設定・認証状態は名前付きボリューム（例: `claude-project-a-config`）に、パイプラインのチケット・テンプレート・自動運転の一時停止状態は `manager/` 配下の JSON ファイル（`pipeline.json`, `templates.json`, `autopilot.json`）に保存されます。設定をリセットしたい場合はボリュームを削除してください。
+各プロジェクトの Claude Code 設定・認証状態は名前付きボリューム（例: `claude-project-design-config`）に、パイプラインのチケット・テンプレート・自動運転の一時停止状態は `manager/` 配下の JSON ファイル（`pipeline.json`, `templates.json`, `autopilot.json`）に保存されます。設定をリセットしたい場合はボリュームを削除してください。
 
 ```bash
 docker compose down
-docker volume rm claude-containers_claude-project-a-config
+docker volume rm claude-containers_claude-project-design-config
 docker compose up -d
 ```
 

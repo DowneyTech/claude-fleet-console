@@ -1,6 +1,6 @@
 [
   {
-    "name": "claude-project-a",
+    "name": "claude-project-design",
     "displayName": "設計担当",
     "workspacePath": "/workspace",
     "permissionMode": "acceptEdits",
@@ -15,7 +15,7 @@
     "role": "design"
   },
   {
-    "name": "claude-project-b",
+    "name": "claude-project-implement",
     "displayName": "実装担当",
     "workspacePath": "/workspace",
     "permissionMode": "bypassPermissions",
@@ -23,7 +23,7 @@
     "requiresApproval": true
   },
   {
-    "name": "claude-project-c",
+    "name": "claude-project-review",
     "displayName": "レビュー担当",
     "workspacePath": "/workspace",
     "permissionMode": "plan",
@@ -35,7 +35,7 @@
     "role": "review"
   },
   {
-    "name": "claude-project-d",
+    "name": "claude-project-test",
     "displayName": "テスト担当",
     "workspacePath": "/workspace",
     "permissionMode": "acceptEdits",
