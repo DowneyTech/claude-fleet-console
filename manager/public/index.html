@@ -334,7 +334,10 @@
     <button type="button" id="pipeline-close" aria-label="閉じる">✕</button>
   </div>
   <div class="pipeline-body">
-    <p class="hint" id="pipeline-master-info">読み込み中…</p>
+    <div class="pipeline-master-row">
+      <p class="hint" id="pipeline-master-info">読み込み中…</p>
+      <button type="button" id="pipeline-autopilot-toggle" class="ghost" hidden></button>
+    </div>
     <form id="pipeline-new-form" class="pipeline-new-form">
       <input type="text" name="title" placeholder="新しい案件名（例: ログイン画面の改修）" autocomplete="off" required>
       <button type="submit" class="send">＋ 追加</button>

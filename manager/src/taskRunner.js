@@ -3,7 +3,7 @@ import { getContainerConfig } from './config.js';
 import { execCapture, execLines } from './docker.js';
 import { pollContainer } from './remoteUsage.js';
 import { clearCurrent, resolveSession } from './sessionStore.js';
-import { recordResult } from './usageStore.js';
+import { recordResult, recordTicketUsage } from './usageStore.js';
 
 // コンテナ名 → 現在（または直近）のタスク。ページを再読み込みしても
 // 実行中タスクに再アタッチできるよう、イベントをここに貯めておく。
@@ -28,7 +28,7 @@ export function getQueue(name) {
   return queues.get(name) ?? [];
 }
 
-function queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId }) {
+function queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId, ticketId }) {
   const item = {
     id: randomUUID(),
     prompt,
@@ -36,6 +36,7 @@ function queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId }) 
     model: model || null,
     onDone: onDone || null,
     resumeSessionId: resumeSessionId || null,
+    ticketId: ticketId || null,
     queuedAt: Date.now(),
   };
   const q = queues.get(cfg.name) ?? [];
@@ -69,6 +70,7 @@ function startNextQueued(cfg) {
     model: next.model,
     onDone: next.onDone,
     resumeSessionId: next.resumeSessionId,
+    ticketId: next.ticketId,
   }).catch((err) => {
     // busy チェックとキュー投入は同期的に行っているため通常は起きないはずだが、
     // 念のため握りつぶさずログには残す。
@@ -158,11 +160,22 @@ function finish(task, { exitCode, error }) {
  */
 export async function startTask(
   cfg,
-  { prompt, newSession = false, model = null, enqueueIfBusy = false, onDone = null, resumeSessionId = null },
+  {
+    prompt,
+    newSession = false,
+    model = null,
+    enqueueIfBusy = false,
+    onDone = null,
+    resumeSessionId = null,
+    ticketId = null,
+  },
 ) {
   if (isBusy(cfg.name)) {
     if (enqueueIfBusy) {
-      return { queued: true, item: queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId }) };
+      return {
+        queued: true,
+        item: queueTask(cfg, { prompt, newSession, model, onDone, resumeSessionId, ticketId }),
+      };
     }
     const err = new Error('このコンテナでは既にタスクが実行中です');
     err.status = 409;
@@ -190,6 +203,9 @@ export async function startTask(
     dropped: 0,
     subscribers: new Set(),
     onDone,
+    // パイプライン機能が「このタスクはどのチケットの一部か」を追跡するための印。
+    // 手動でカードから投げたタスクは null のまま（パイプライン非依存）。
+    ticketId,
   };
   // await を挟む前に枠を確保する。セッション解決を待ってから登録すると、
   // 同時に来たリクエストが両方とも isBusy を通過して二重起動する。
@@ -240,7 +256,10 @@ export async function startTask(
       // 使用量は result イベントにだけ載る。ストリームへ流す前に確定させ、
       // SSE 受信直後にポーリングした UI が古い累計を見ないようにする。
       const usage = obj.type === 'result' ? recordResult(cfg.name, obj) : null;
-      if (usage) task.usage = usage;
+      if (usage) {
+        task.usage = usage;
+        if (task.ticketId) recordTicketUsage(task.ticketId, usage);
+      }
 
       emit(task, 'stream', obj);
     },
@@ -312,5 +331,6 @@ export function snapshot(task) {
     error: task.error,
     usage: task.usage,
     eventCount: task.events.length,
+    ticketId: task.ticketId,
   };
 }

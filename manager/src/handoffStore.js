@@ -53,3 +53,16 @@ export function readArtifact(id, filename) {
   }
   return readFileSync(file, 'utf8');
 }
+
+/**
+ * ファイルの更新時刻だけを取得する。マスターの判断ファイルを読む前に、
+ * 「このマスター実行より前から存在していた（＝別の作業や以前の実行が
+ * 残した／仕込んだファイルかもしれない）」ものでないかを確認する用途。
+ */
+export function statArtifact(id, filename) {
+  if (typeof filename !== 'string' || !filename || filename.includes('/') || filename.includes('..')) {
+    throw Object.assign(new Error('invalid filename'), { status: 400 });
+  }
+  const st = statSync(path.join(ticketDir(id), filename));
+  return { size: st.size, mtime: st.mtimeMs };
+}

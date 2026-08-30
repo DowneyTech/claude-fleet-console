@@ -26,6 +26,7 @@ import { EventEmitter } from 'node:events';
  */
 
 const totals = new Map(); // コンテナ名 → 累計
+const ticketTotals = new Map(); // パイプラインのチケット ID → 累計（コンテナ横断で合算）
 const rateLimits = new Map(); // コンテナ名 → { five_hour, seven_day, ... }
 const startedAt = Date.now();
 
@@ -142,6 +143,30 @@ export function recordResult(name, result) {
 
 export function usageFor(name) {
   return { ...(totals.get(name) ?? emptyTotals()), since: startedAt };
+}
+
+/**
+ * パイプラインの自動運転はチケット1件が複数コンテナへタスクを連鎖させるため、
+ * コンテナ単位の集計だけでは「このチケットにどれだけ使ったか」が見えない。
+ * recordResult が返す使用量をそのままチケット単位でも積み上げておく。
+ */
+export function recordTicketUsage(ticketId, usage) {
+  if (!ticketId || !usage) return;
+  const total = ticketTotals.get(ticketId) ?? emptyTotals();
+  total.costUsd += usage.costUsd;
+  total.inputTokens += usage.inputTokens;
+  total.outputTokens += usage.outputTokens;
+  total.cacheReadTokens += usage.cacheReadTokens;
+  total.cacheCreationTokens += usage.cacheCreationTokens;
+  total.webSearches += usage.webSearches;
+  total.turns += usage.turns;
+  total.tasks += 1;
+  total.lastAt = Date.now();
+  ticketTotals.set(ticketId, total);
+}
+
+export function usageForTicket(ticketId) {
+  return ticketTotals.get(ticketId) ?? emptyTotals();
 }
 
 /** 全コンテナの合計。ヘッダーの表示に使う。 */

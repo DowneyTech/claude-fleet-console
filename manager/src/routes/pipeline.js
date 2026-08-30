@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isAutopilotPaused, setAutopilotPaused } from '../autopilotStore.js';
 import {
   advanceTicket,
   createTicket,
@@ -11,6 +12,7 @@ import {
   stagesInfo,
 } from '../pipelineStore.js';
 import { listArtifacts, readArtifact } from '../handoffStore.js';
+import { usageForTicket } from '../usageStore.js';
 
 const router = Router();
 
@@ -23,11 +25,18 @@ router.get('/stages', (_req, res) => res.json({ stages: stagesInfo() }));
 
 router.get('/master', (_req, res) => res.json(masterInfo()));
 
+router.get('/autopilot', (_req, res) => res.json({ paused: isAutopilotPaused() }));
+
+router.post('/autopilot', (req, res) => {
+  setAutopilotPaused(Boolean(req.body?.paused));
+  res.json({ paused: isAutopilotPaused() });
+});
+
 router.get('/tickets', (_req, res) => res.json({ tickets: listTickets() }));
 
-router.post('/tickets', (req, res, next) => {
+router.post('/tickets', async (req, res, next) => {
   try {
-    res.status(201).json(createTicket({ title: req.body?.title }));
+    res.status(201).json(await createTicket({ title: req.body?.title }));
   } catch (err) {
     handleStoreError(err, res, next);
   }
@@ -41,13 +50,17 @@ router.get('/tickets/:id', (req, res, next) => {
   }
 });
 
-router.delete('/tickets/:id', (req, res, next) => {
+router.delete('/tickets/:id', async (req, res, next) => {
   try {
-    removeTicket(req.params.id);
+    await removeTicket(req.params.id);
     res.status(204).end();
   } catch (err) {
     handleStoreError(err, res, next);
   }
+});
+
+router.get('/tickets/:id/usage', (req, res) => {
+  res.json(usageForTicket(req.params.id));
 });
 
 router.post('/tickets/:id/send', async (req, res, next) => {

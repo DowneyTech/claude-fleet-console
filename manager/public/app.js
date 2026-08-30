@@ -654,7 +654,11 @@ function updateCard(data) {
   els.approvalBadge.hidden = !data.requiresApproval;
 
   els.state.textContent = STATE_LABEL[data.state] ?? data.state;
-  els.activity.textContent = data.busy ? '実行中' : ago(data.lastActivity);
+  els.activity.textContent = data.busy
+    ? data.task?.ticketId
+      ? `実行中（パイプライン: ${short(data.task.ticketId)}）`
+      : '実行中'
+    : ago(data.lastActivity);
   els.session.textContent = short(data.task?.sessionId ?? data.latestSessionId);
   els.session.title = data.task?.sessionId ?? data.latestSessionId ?? '';
   els.model.textContent = data.model || 'アカウント既定';
@@ -1527,6 +1531,31 @@ const pipelineNewForm = document.getElementById('pipeline-new-form');
 const pipelineBoard = document.getElementById('pipeline-board');
 const pipelineDetail = document.getElementById('pipeline-detail');
 const pipelineMasterInfo = document.getElementById('pipeline-master-info');
+const pipelineAutopilotToggle = document.getElementById('pipeline-autopilot-toggle');
+
+let autopilotPaused = false;
+
+pipelineAutopilotToggle.addEventListener('click', async () => {
+  pipelineAutopilotToggle.disabled = true;
+  try {
+    const data = await apiPipeline('/autopilot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: !autopilotPaused }),
+    });
+    autopilotPaused = data.paused;
+    renderAutopilotToggle();
+  } catch (err) {
+    window.alert(`切り替えに失敗しました: ${err.message}`);
+  } finally {
+    pipelineAutopilotToggle.disabled = false;
+  }
+});
+
+function renderAutopilotToggle() {
+  pipelineAutopilotToggle.hidden = false;
+  pipelineAutopilotToggle.textContent = autopilotPaused ? '自動運転を再開する' : '自動運転を一時停止する';
+}
 
 document.getElementById('pipeline-close').addEventListener('click', () => pipelineDialog.close());
 document.getElementById('open-pipeline').addEventListener('click', () => {
@@ -1544,16 +1573,25 @@ function stageInfo(stage) {
 
 async function loadPipeline() {
   try {
-    const [stagesData, ticketsData, master] = await Promise.all([
+    const [stagesData, ticketsData, master, autopilot] = await Promise.all([
       apiPipeline('/stages'),
       apiPipeline('/tickets'),
       apiPipeline('/master'),
+      apiPipeline('/autopilot'),
     ]);
     pipelineStages = stagesData.stages ?? [];
     pipelineTickets = ticketsData.tickets ?? [];
-    pipelineMasterInfo.textContent = master.displayName
-      ? `司令塔: ${master.displayName}（各工程の完了後に自動で進める/差し戻す/保留を判断します）`
-      : 'マスター役が未設定です（コンテナ設定で役割を「マスター」にすると、工程完了後の判断を自動化できます）';
+    autopilotPaused = Boolean(autopilot.paused);
+
+    if (master.displayName) {
+      pipelineMasterInfo.textContent = autopilotPaused
+        ? `司令塔: ${master.displayName}（自動運転は一時停止中です）`
+        : `司令塔: ${master.displayName}（各工程の完了後に自動で進める/差し戻す/保留を判断します）`;
+      renderAutopilotToggle();
+    } else {
+      pipelineMasterInfo.textContent = 'マスター役が未設定です（コンテナ設定で役割を「マスター」にすると、工程完了後の判断を自動化できます）';
+      pipelineAutopilotToggle.hidden = true;
+    }
   } catch (err) {
     pipelineBoard.textContent = '';
     pipelineBoard.appendChild(el('p', 'hint', `取得に失敗しました: ${err.message}`));
@@ -1760,6 +1798,23 @@ async function renderPipelineDetail(id) {
   }
 
   pipelineDetail.appendChild(actions);
+
+  const usageBox = el('p', 'pipeline-usage', '使用量を読み込み中…');
+  pipelineDetail.appendChild(usageBox);
+  apiPipeline(`/tickets/${encodeURIComponent(ticket.id)}/usage`)
+    .then((usage) => {
+      if (!usage || usage.tasks === 0) {
+        usageBox.textContent = 'このチケットではまだタスクが完了していません。';
+        return;
+      }
+      usageBox.textContent =
+        `このチケットの累計使用量: $${usage.costUsd.toFixed(4)} ・ ` +
+        `トークン ${(usage.inputTokens + usage.outputTokens).toLocaleString('ja-JP')} ・ ` +
+        `タスク ${usage.tasks} 件`;
+    })
+    .catch(() => {
+      usageBox.textContent = '使用量の取得に失敗しました。';
+    });
 
   const historyBox = el('div', 'pipeline-history');
   historyBox.appendChild(el('div', 'pipeline-subhead', '履歴'));

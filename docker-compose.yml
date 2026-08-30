@@ -76,6 +76,9 @@ services:
       # 設定UI から `docker compose` を呼ぶとき、compose ファイル中の ${HOME} を
       # manager コンテナ自身の HOME ではなくホストの実際の $HOME で展開させるために使う。
       - HOST_HOME=${HOME}
+      # パイプラインのマスター自動運転の暴走防止しきい値（任意・既定値のままで良ければ不要）。
+      # - PIPELINE_MAX_CONSECUTIVE_REJECTS=3
+      # - PIPELINE_MAX_AUTO_HOPS=12
     # docker.sock はホストの root 相当の権限。manager 以外には渡さないこと。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
