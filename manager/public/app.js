@@ -53,8 +53,13 @@ function characterFor(name) {
 
 /* ------------------------------ helpers ------------------------------ */
 
-async function apiCall(base, path, options) {
-  const res = await fetch(`${base}${path}`, options);
+// manager 側の CSRF 対策（単純な <form> POST では付けられないヘッダを必須化）に
+// 合わせて、すべてのリクエストにこのヘッダを付ける。値そのものに意味はない
+// （秘密情報ではない）が、cross-origin の fetch は非単純リクエスト扱いになり
+// CORS プリフライトでブロックされる、というのが実際の防御になる。
+async function apiCall(base, path, options = {}) {
+  const headers = { ...(options.headers ?? {}), 'X-Fleet-Console': '1' };
+  const res = await fetch(`${base}${path}`, { ...options, headers });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);

@@ -26,6 +26,34 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * CSRF 対策。この manager は認証機構を持たず 127.0.0.1 限定公開だけで守っている
+ * ため、上の Host チェック（DNS リバインディング対策）だけでは、悪意ある
+ * Web ページが同じブラウザから直接 http://localhost:4590/... へ送るリクエスト
+ * を防げない（Host ヘッダは常に正しく 'localhost:4590' になるため）。単純な
+ * <form method=POST> はカスタムヘッダを付けられないので、状態変更系
+ * （GET/HEAD/OPTIONS 以外）のリクエストに専用ヘッダを必須にすることで弾く。
+ * fetch で偽装しようとしても、cross-origin かつ 'application/json' のような
+ * 非単純ヘッダを伴うと CORS プリフライトが必要になり、こちらは許可レスポンス
+ * を返さないためブラウザ側でブロックされる。
+ * あわせて、モダンブラウザが自動付与する Sec-Fetch-Site（改ざん不可）で
+ * cross-site/same-site を明示的に拒否する（フォーム送信にも付くため二重の防御になる）。
+ */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const REQUIRED_HEADER = 'x-fleet-console';
+app.use((req, res, next) => {
+  if (SAFE_METHODS.has(req.method)) return next();
+
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
+    return res.status(403).json({ error: 'forbidden (cross-site request)' });
+  }
+  if (req.headers[REQUIRED_HEADER] !== '1') {
+    return res.status(403).json({ error: 'forbidden (missing required header)' });
+  }
+  next();
+});
+
 app.use(express.json({ limit: '256kb' }));
 
 // いずれも /api/containers 配下。パスが重ならないので同じ mount point に並べられる。

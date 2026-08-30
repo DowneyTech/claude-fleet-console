@@ -50,6 +50,18 @@ export const STAGE_META = {
   done: { label: '完了', artifact: null, instruction: null },
 };
 
+/**
+ * 環境変数を整数として読む。`Number(raw) || fallback` は raw="0" のような
+ * 「意図的な 0 指定」を JS の falsy 判定で握りつぶしてしまうため使わない。
+ * 未設定・空・数値でない場合だけ fallback を使う。
+ */
+function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // マスターの自動判断が暴走しないための2種類の上限。環境変数で調整できる
 // （docker-compose.yml の manager サービスに設定する）。
 // - 連続REJECT: 同じところで往復し続けていないか
@@ -57,8 +69,8 @@ export const STAGE_META = {
 //   引っかからないが際限なくタスクを消費するので、こちらで別途頭打ちにする。
 // どちらも人間が手動で送信/進行/差し戻しを行うとリセットされる
 // （＝人間が一度確認・介入した、という合図として扱う）。
-const MAX_CONSECUTIVE_REJECTS = Number(process.env.PIPELINE_MAX_CONSECUTIVE_REJECTS) || 3;
-const MAX_AUTO_HOPS = Number(process.env.PIPELINE_MAX_AUTO_HOPS) || 12;
+const MAX_CONSECUTIVE_REJECTS = envInt('PIPELINE_MAX_CONSECUTIVE_REJECTS', 3);
+const MAX_AUTO_HOPS = envInt('PIPELINE_MAX_AUTO_HOPS', 12);
 
 // 成果物ファイルは他の Claude エージェントが書いた自然文であり、その中に
 // 「これを実行してください」のような指示文が（意図的か偶然かに関わらず）
@@ -72,8 +84,13 @@ const UNTRUSTED_CONTENT_NOTICE =
 /**
  * 全チケット共通の書き込みキュー。`load()`→（await を挟む処理）→`save()` という
  * 形の関数が複数同時に走ると、後から save() した側が先の変更を握りつぶす
- * （lost update）。全ての変更操作をこのキューで直列化し、常に「最新の状態を
- * 読んでから書く」を保証する。
+ * （lost update）。pipeline.json は全チケットを1つの配列にまとめて保持する
+ * ファイルなので、チケットごとにロックを分けても「別チケットの保存が割り込む」
+ * 問題は解消できない（同じファイルを丸ごと読み書きするため）。そのため
+ * ロック自体は全チケット共通のまま据え置き、代わりに「ロックを握ったまま
+ * 低速な処理（実タスク投入）を待たない」ことで無関係なチケット同士が
+ * 待ち合う時間を最小化する（sendCurrentStage/advanceTicket/rejectTicket の
+ * 2フェーズ構成を参照）。
  */
 let mutationQueue = Promise.resolve();
 function withLock(fn) {
@@ -156,9 +173,11 @@ export function createTicket({ title }) {
       updatedAt: Date.now(),
       // マスターが差し戻しを繰り返していないかの安全装置。
       autopilot: { consecutiveRejects: 0, totalAutoHops: 0, paused: false },
-      // 工程（stage）ごとに、そのチケット専用の Claude セッション ID を覚えておく。
-      // これが無いと「コンテナの現在のセッション」という共有状態を複数チケットが
-      // 取り合い、別チケットの文脈を resume してしまう事故が起きる。
+      // 工程（stage）ごと・マスター判断ごとに、そのチケット専用の Claude
+      // セッション ID を覚えておく。'design'|'implement'|'review'|'test' の
+      // 4工程に加えて 'master' キーも使う。これが無いと「コンテナの現在の
+      // セッション」という共有状態を複数チケットが取り合い、別チケットの
+      // 文脈を resume してしまう事故が起きる。
       sessions: {},
       history: [{ stage: STAGE_ORDER[0], at: Date.now(), kind: 'created', note: null, project: null, actor: 'human' }],
     };
@@ -204,17 +223,18 @@ export function removeTicket(id) {
 /**
  * 直前工程の成果物への参照とメモを含めた、送信先工程向けの指示文を組み立てる。
  * 工程ごとに何を確認し何を書き出すべきかは STAGE_META に集約しているので、
- * ここでは前後の工程を繋ぐだけでよい。
+ * ここでは前後の工程を繋ぐだけでよい。ロック外（低速フェーズ）で呼ぶため、
+ * 生きた ticket オブジェクトではなく { id, title } のスナップショットを取る。
  */
-function buildHandoffPrompt(ticket, stage, note) {
-  const dir = `/handoff/${ticket.id}`;
+function buildHandoffPrompt(ticketSnapshot, stage, note) {
+  const dir = `/handoff/${ticketSnapshot.id}`;
   const meta = STAGE_META[stage];
   const idx = STAGE_ORDER.indexOf(stage);
   const prevStage = idx > 0 ? STAGE_ORDER[idx - 1] : null;
   const prevMeta = prevStage ? STAGE_META[prevStage] : null;
 
   const lines = [
-    `パイプライン案件「${ticket.title}」（id: ${ticket.id}）の${meta.label}工程です。`,
+    `パイプライン案件「${ticketSnapshot.title}」（id: ${ticketSnapshot.id}）の${meta.label}工程です。`,
     `関連ファイルは ${dir}/ にあります。まず \`ls ${dir}\` で何があるか確認してください。`,
   ];
   if (prevMeta?.artifact) {
@@ -230,7 +250,7 @@ function buildHandoffPrompt(ticket, stage, note) {
   return lines.join('\n');
 }
 
-/** タスク完了時に、このチケット・この工程で使ったセッションを記憶する。 */
+/** タスク完了時に、このチケット・この工程（'master' も可）で使ったセッションを記憶する。 */
 function recordStageSession(ticketId, stage, sessionId) {
   if (!sessionId) return Promise.resolve();
   return withLock(() => {
@@ -243,18 +263,10 @@ function recordStageSession(ticketId, stage, sessionId) {
 }
 
 /**
- * 工程の担当プロジェクトへタスクを送信する。タスクが完了した時点で、
- * (1) このチケット・この工程用のセッションを記録し、
- * (2) マスターが設定されていれば自動判断（invokeMaster）を差し込む。
- * (2) は「人間がボタンを押して送った」場合も「マスターが判断した結果送った」
- * 場合も同じフックが効くので、自動運転が連鎖する。
- *
- * newSession は「このチケットがこの工程に来るのが初めてかどうか」で決める。
- * 2回目以降（差し戻しからの再送など）は、このチケット専用に記憶した
- * セッションIDを明示的に resume する。コンテナの「現在のセッション」という
- * 共有状態に頼ると、別チケットが間に割り込んだ場合に文脈が混ざるため。
+ * sendToStage の前段（ロック内・高速）: 送信先プロジェクトと resume すべき
+ * セッションを決めるだけ。実際にタスクを投げる dispatchSend はロック外で呼ぶ。
  */
-async function sendToStage(ticket, stage, note) {
+function prepareSend(ticket, stage) {
   const cfg = projectForStage(stage);
   if (!cfg) {
     throw Object.assign(
@@ -265,10 +277,20 @@ async function sendToStage(ticket, stage, note) {
       { status: 409 },
     );
   }
-  ensureTicketDir(ticket.id);
-  const resumeSessionId = ticket.sessions?.[stage] ?? null;
-  const prompt = buildHandoffPrompt(ticket, stage, note);
-  const ticketId = ticket.id;
+  return { cfg, resumeSessionId: ticket.sessions?.[stage] ?? null };
+}
+
+/**
+ * 実際にタスクを投げる（ロックを握らずに呼ぶ・低速部分）。完了時に
+ * (1) このチケット・この工程用のセッションを記録し、
+ * (2) マスターが設定されていれば自動判断（invokeMaster）を差し込む。
+ * (2) は「人間がボタンを押して送った」場合も「マスターが判断した結果送った」
+ * 場合も同じフックが効くので、自動運転が連鎖する。
+ */
+async function dispatchSend(ticketSnapshot, stage, note, { cfg, resumeSessionId }) {
+  const ticketId = ticketSnapshot.id;
+  ensureTicketDir(ticketId);
+  const prompt = buildHandoffPrompt(ticketSnapshot, stage, note);
   const result = await startTask(cfg, {
     prompt,
     newSession: !resumeSessionId,
@@ -294,14 +316,14 @@ async function sendToStage(ticket, stage, note) {
   };
 }
 
-function resetAutopilot(ticket) {
-  ticket.autopilot = { consecutiveRejects: 0, totalAutoHops: 0, paused: false };
+function resetAutopilot() {
+  return { consecutiveRejects: 0, totalAutoHops: 0, paused: false };
 }
 
 /**
  * マスター主導（actor === 'master'）の遷移を許可してよいか判定する。
  * 許可する場合は更新後の autopilot を、許可しない場合は理由つきで拒否を返す。
- * 呼び出し側は拒否された場合、実際の送信（sendToStage）を行わずに
+ * 呼び出し側は拒否された場合、実際の送信（dispatchSend）を行わずに
  * 'master_paused' を記録して連鎖を止める。
  */
 function checkAutopilotBudget(ticket, { isReject }) {
@@ -337,26 +359,47 @@ function needsHumanApproval(actor, targetStage) {
   return cfg?.requiresApproval ? cfg : null;
 }
 
-/** 現在の工程の担当プロジェクトへ（再）送信する。ステージは変えない。 */
+/**
+ * 現在の工程の担当プロジェクトへ（再）送信する。ステージは変えない。
+ * フェーズ1（ロック内・高速）で判定、フェーズ2（ロック外）で実送信、
+ * フェーズ3（ロック内・高速）で結果を確定させる2段ロック構成。
+ * これにより、無関係な別チケットの操作がこのチケットの実タスク送信
+ * （docker exec を伴い遅い）の完了を待たずに進められる。
+ */
 export function sendCurrentStage(id, note, actor = 'human') {
-  return withLock(async () => {
+  return withLock(() => {
     const list = load();
     const ticket = list.find((t) => t.id === id);
     if (!ticket) throw Object.assign(new Error(`未登録のチケットです: ${id}`), { status: 404 });
 
-    if (actor === 'human') resetAutopilot(ticket);
-    const outcome = await sendToStage(ticket, ticket.stage, note);
-    ticket.updatedAt = Date.now();
-    ticket.history.push({
+    const nextAutopilot = actor === 'human' ? resetAutopilot() : ticket.autopilot;
+    const prepared = prepareSend(ticket, ticket.stage);
+    return {
       stage: ticket.stage,
-      at: Date.now(),
-      kind: 'sent',
-      note: note || null,
-      project: outcome.project,
-      actor,
+      nextAutopilot,
+      ticketSnapshot: { id: ticket.id, title: ticket.title },
+      prepared,
+    };
+  }).then(async (phase1) => {
+    const outcome = await dispatchSend(phase1.ticketSnapshot, phase1.stage, note, phase1.prepared);
+
+    return withLock(() => {
+      const list = load();
+      const ticket = list.find((t) => t.id === phase1.ticketSnapshot.id);
+      if (!ticket) return { ticket: null, outcome };
+      ticket.autopilot = phase1.nextAutopilot;
+      ticket.updatedAt = Date.now();
+      ticket.history.push({
+        stage: ticket.stage,
+        at: Date.now(),
+        kind: 'sent',
+        note: note || null,
+        project: outcome.project,
+        actor,
+      });
+      save(list);
+      return { ticket, outcome };
     });
-    save(list);
-    return { ticket, outcome };
   });
 }
 
@@ -366,10 +409,10 @@ export function sendCurrentStage(id, note, actor = 'human') {
  * actor が 'master' で、進む先の工程が requiresApproval の場合は、実際には
  * 進めずに「承認待ち」を記録して止める。人間が手動でこのエンドポイントを
  * 呼んだとき（actor: 'human'）はそのまま実行する＝人間がボタンを押すこと
- * 自体が承認になる。
+ * 自体が承認になる。sendCurrentStage と同じ2段ロック構成。
  */
 export function advanceTicket(id, note, actor = 'human') {
-  return withLock(async () => {
+  return withLock(() => {
     const list = load();
     const ticket = list.find((t) => t.id === id);
     if (!ticket) throw Object.assign(new Error(`未登録のチケットです: ${id}`), { status: 404 });
@@ -392,15 +435,16 @@ export function advanceTicket(id, note, actor = 'human') {
         actor: 'master',
       });
       save(list);
-      return { ticket, outcome: null, needsApproval: true };
+      return { settled: { ticket, outcome: null, needsApproval: true } };
     }
 
+    let nextAutopilot;
     if (actor === 'human') {
-      resetAutopilot(ticket);
+      nextAutopilot = resetAutopilot();
     } else {
       const check = checkAutopilotBudget(ticket, { isReject: false });
-      ticket.autopilot = check.autopilot;
       if (!check.ok) {
+        ticket.autopilot = check.autopilot;
         ticket.updatedAt = Date.now();
         ticket.history.push({
           stage: ticket.stage,
@@ -411,23 +455,49 @@ export function advanceTicket(id, note, actor = 'human') {
           actor: 'master',
         });
         save(list);
-        return { ticket, outcome: null };
+        return { settled: { ticket, outcome: null } };
       }
+      nextAutopilot = check.autopilot;
     }
 
-    const outcome = nextStage === 'done' ? null : await sendToStage(ticket, nextStage, note);
-    ticket.stage = nextStage;
-    ticket.updatedAt = Date.now();
-    ticket.history.push({
-      stage: nextStage,
-      at: Date.now(),
-      kind: 'advanced',
-      note: note || null,
-      project: outcome?.project ?? null,
-      actor,
+    if (nextStage === 'done') {
+      ticket.autopilot = nextAutopilot;
+      ticket.stage = nextStage;
+      ticket.updatedAt = Date.now();
+      ticket.history.push({ stage: nextStage, at: Date.now(), kind: 'advanced', note: note || null, project: null, actor });
+      save(list);
+      return { settled: { ticket, outcome: null } };
+    }
+
+    // ここから先（実タスク送信）は低速なので、ロックを手放してから行う。
+    const prepared = prepareSend(ticket, nextStage);
+    return {
+      pending: { nextStage, nextAutopilot, ticketSnapshot: { id: ticket.id, title: ticket.title }, prepared },
+    };
+  }).then(async (phase1) => {
+    if (phase1.settled) return phase1.settled;
+
+    const { nextStage, nextAutopilot, ticketSnapshot, prepared } = phase1.pending;
+    const outcome = await dispatchSend(ticketSnapshot, nextStage, note, prepared);
+
+    return withLock(() => {
+      const list = load();
+      const ticket = list.find((t) => t.id === ticketSnapshot.id);
+      if (!ticket) return { ticket: null, outcome }; // 送信中に削除された等。
+      ticket.autopilot = nextAutopilot;
+      ticket.stage = nextStage;
+      ticket.updatedAt = Date.now();
+      ticket.history.push({
+        stage: nextStage,
+        at: Date.now(),
+        kind: 'advanced',
+        note: note || null,
+        project: outcome.project,
+        actor,
+      });
+      save(list);
+      return { ticket, outcome };
     });
-    save(list);
-    return { ticket, outcome };
   });
 }
 
@@ -436,9 +506,10 @@ export function advanceTicket(id, note, actor = 'human') {
  * actor が 'master' の場合、差し戻し先が requiresApproval なら（ADVANCE と
  * 同様に）承認待ちにする。承認不要なら自動運転の予算（連続REJECT数・
  * 累計自動ホップ数）を消費し、使い切ったら実際の差し戻しは行わず止める。
+ * advanceTicket と同じ2段ロック構成。
  */
 export function rejectTicket(id, toStage, note, actor = 'human') {
-  return withLock(async () => {
+  return withLock(() => {
     const list = load();
     const ticket = list.find((t) => t.id === id);
     if (!ticket) throw Object.assign(new Error(`未登録のチケットです: ${id}`), { status: 404 });
@@ -461,15 +532,16 @@ export function rejectTicket(id, toStage, note, actor = 'human') {
         actor: 'master',
       });
       save(list);
-      return { ticket, outcome: null, needsApproval: true };
+      return { settled: { ticket, outcome: null, needsApproval: true } };
     }
 
+    let nextAutopilot;
     if (actor === 'human') {
-      resetAutopilot(ticket);
+      nextAutopilot = resetAutopilot();
     } else {
       const check = checkAutopilotBudget(ticket, { isReject: true });
-      ticket.autopilot = check.autopilot;
       if (!check.ok) {
+        ticket.autopilot = check.autopilot;
         ticket.updatedAt = Date.now();
         ticket.history.push({
           stage: ticket.stage,
@@ -481,23 +553,39 @@ export function rejectTicket(id, toStage, note, actor = 'human') {
         });
         save(list);
         // 実際の差し戻し（タスク投入）は行わずに終える＝連鎖を止める。
-        return { ticket, outcome: null };
+        return { settled: { ticket, outcome: null } };
       }
+      nextAutopilot = check.autopilot;
     }
 
-    const outcome = await sendToStage(ticket, toStage, note);
-    ticket.stage = toStage;
-    ticket.updatedAt = Date.now();
-    ticket.history.push({
-      stage: toStage,
-      at: Date.now(),
-      kind: 'rejected',
-      note: note || null,
-      project: outcome.project,
-      actor,
+    const prepared = prepareSend(ticket, toStage);
+    return {
+      pending: { toStage, nextAutopilot, ticketSnapshot: { id: ticket.id, title: ticket.title }, prepared },
+    };
+  }).then(async (phase1) => {
+    if (phase1.settled) return phase1.settled;
+
+    const { toStage, nextAutopilot, ticketSnapshot, prepared } = phase1.pending;
+    const outcome = await dispatchSend(ticketSnapshot, toStage, note, prepared);
+
+    return withLock(() => {
+      const list = load();
+      const ticket = list.find((t) => t.id === ticketSnapshot.id);
+      if (!ticket) return { ticket: null, outcome };
+      ticket.autopilot = nextAutopilot;
+      ticket.stage = toStage;
+      ticket.updatedAt = Date.now();
+      ticket.history.push({
+        stage: toStage,
+        at: Date.now(),
+        kind: 'rejected',
+        note: note || null,
+        project: outcome.project,
+        actor,
+      });
+      save(list);
+      return { ticket, outcome };
     });
-    save(list);
-    return { ticket, outcome };
   });
 }
 
@@ -570,16 +658,25 @@ async function invokeMaster(ticketId, completedStage, completedTask) {
     UNTRUSTED_CONTENT_NOTICE,
   ].join('\n');
 
+  // マスター自身のタスクも、他のチケットの判断と文脈が混ざらないよう
+  // このチケット専用のセッションを resume する（無ければ新規発行）。
+  const resumeSessionId = ticket.sessions?.master ?? null;
+
   await startTask(masterCfg, {
     prompt,
-    newSession: false,
+    newSession: !resumeSessionId,
+    resumeSessionId,
     model: null,
     enqueueIfBusy: true,
     ticketId: ticket.id,
     onDone: (task) => {
-      handleMasterDecision(ticketId, completedStage, task).catch((err) => {
-        console.error(`[pipelineStore] マスターの判断の反映に失敗しました (${ticketId}): ${err.message}`);
-      });
+      recordStageSession(ticketId, 'master', task.sessionId)
+        .catch((err) => console.error(`[pipelineStore] マスターのセッション記録に失敗しました (${ticketId}): ${err.message}`))
+        .finally(() => {
+          handleMasterDecision(ticketId, completedStage, task).catch((err) => {
+            console.error(`[pipelineStore] マスターの判断の反映に失敗しました (${ticketId}): ${err.message}`);
+          });
+        });
     },
   });
 }

