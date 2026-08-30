@@ -15,7 +15,9 @@ services:
       # 相対パスにしないのは、manager がコンテナ内から `docker compose` を呼ぶとき
       # 自分の /compose-project という見え方を基準に解決してしまい、ホストに
       # 実在しないパスをバインドしようとするため（下の manager サービスの説明を参照）。
-      - /Users/kinchan/Project/claude-containers/workspaces/design:/workspace
+      # ${HOST_PROJECT_DIR} はこのリポジトリをクローンしたホスト側の絶対パス。
+      # `.env`（`.env.example` をコピーして作る）で1箇所だけ設定すればよい。
+      - ${HOST_PROJECT_DIR}/workspaces/design:/workspace
       # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
       # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
       - ${HOME}/Project:/vault:ro
@@ -33,7 +35,7 @@ services:
     restart: unless-stopped
     volumes:
       - claude-project-implement-config:/home/claude/.claude
-      - /Users/kinchan/Project/claude-containers/workspaces/implement:/workspace
+      - ${HOST_PROJECT_DIR}/workspaces/implement:/workspace
       # :ro 必須。UI からのタスクは bypassPermissions で無確認実行されるため、
       # 書き込み可能だとホストの ~/Project 配下を丸ごと破壊しうる。
       - ${HOME}/Project:/vault:ro
@@ -49,7 +51,7 @@ services:
     restart: unless-stopped
     volumes:
       - claude-project-test-config:/home/claude/.claude
-      - /Users/kinchan/Project/claude-containers/workspaces/test:/workspace
+      - ${HOST_PROJECT_DIR}/workspaces/test:/workspace
       - ${HOME}/Project:/vault:ro
       - ${HOME}/Project/.fleet-handoff:/handoff
 
@@ -63,7 +65,7 @@ services:
     restart: unless-stopped
     volumes:
       - claude-project-master-config:/home/claude/.claude
-      - /Users/kinchan/Project/claude-containers/workspaces/master:/workspace
+      - ${HOST_PROJECT_DIR}/workspaces/master:/workspace
       - ${HOME}/Project:/vault:ro
       # 各工程の成果物を読み、判断結果（decision-*.json）を書き出すための共有フォルダ。
       - ${HOME}/Project/.fleet-handoff:/handoff
@@ -83,6 +85,10 @@ services:
       # パイプラインのマスター自動運転の暴走防止しきい値（任意・既定値のままで良ければ不要）。
       # - PIPELINE_MAX_CONSECUTIVE_REJECTS=3
       # - PIPELINE_MAX_AUTO_HOPS=12
+      # 任意の共有トークン認証（既定は無効）。SSH トンネル越しなど 127.0.0.1 以外の
+      # 経路から到達しうる運用をする場合の追加の保険として設定する。
+      # 設定すると /api への全アクセスにこのトークンを要求する（README のセキュリティ上の注意を参照）。
+      # - FLEET_CONSOLE_TOKEN=change-me-to-a-long-random-string
     # docker.sock はホストの root 相当の権限。manager 以外には渡さないこと。
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -93,10 +99,10 @@ services:
       # `docker compose` を呼ぶとき、CLI はこの行を自分の /compose-project
       # という「見え方」（あるいは manager プロセス自身の PWD）を基準に解決
       # してしまい、ホストに実在しないパスをバインドしようとして自分自身を
-      # 壊れた状態で再作成してしまう（実際に起きた障害）。絶対パスで固定して
-      # おけば、誰が・どこから `docker compose` を呼んでも再解釈されない。
-      # プロジェクトルートを移動した場合はここも合わせて書き換えること。
-      - /Users/kinchan/Project/claude-containers:/compose-project
+      # 壊れた状態で再作成してしまう（実際に起きた障害）。絶対パスで固定する
+      # 必要があるため ${HOST_PROJECT_DIR} を使う（上の各サービスと同じ変数。
+      # `.env` の1箇所を直せば、ここも含めて全サービスに反映される）。
+      - ${HOST_PROJECT_DIR}:/compose-project
       # プロジェクトコンテナと同じホストパスを manager 自身にもマウントし、
       # 各コンテナが停止していても handoff 成果物を fs で直接読み書きできるようにする。
       - ${HOME}/Project/.fleet-handoff:/handoff
@@ -117,7 +123,7 @@ services:
     restart: unless-stopped
     volumes:
       - claude-project-review-config:/home/claude/.claude
-      - /Users/kinchan/Project/claude-containers/workspaces/review:/workspace
+      - ${HOST_PROJECT_DIR}/workspaces/review:/workspace
       - ${HOME}/Project:/vault:ro
       - ${HOME}/Project/.fleet-handoff:/handoff
 

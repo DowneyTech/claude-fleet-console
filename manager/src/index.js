@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import authRouter from './routes/auth.js';
 import { listContainerConfigs, publicDir } from './config.js';
@@ -53,6 +54,37 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+/**
+ * 任意のローカル共有トークン認証。既定では無効（今までどおり 127.0.0.1 限定公開 +
+ * 上記の CSRF 対策のみ）。SSH トンネル越しなど、127.0.0.1 以外の経路から
+ * manager に到達しうる運用をする場合の追加の保険として、FLEET_CONSOLE_TOKEN を
+ * 設定すると /api への全リクエストにこのトークンを要求するようになる。
+ * EventSource はブラウザの仕様上カスタムヘッダを送れないため、クエリ文字列
+ * （?token=）でも受け付ける（値そのものは秘密情報だが、127.0.0.1 限定公開が
+ * 前提の個人利用ツールという性質上、アクセスログへの残留は許容している）。
+ */
+const CONSOLE_TOKEN = process.env.FLEET_CONSOLE_TOKEN || null;
+
+function timingSafeTokenEqual(provided, expected) {
+  const a = Buffer.from(String(provided));
+  const b = Buffer.from(expected);
+  // 長さが違うと timingSafeEqual 自体が例外を投げるため、先に弾く
+  // （長さの違いが漏れても、トークン自体の長さは秘密ではないので問題ない）。
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+if (CONSOLE_TOKEN) {
+  app.use('/api', (req, res, next) => {
+    const provided = req.headers['x-fleet-token'] ?? req.query.token;
+    if (typeof provided !== 'string' || !timingSafeTokenEqual(provided, CONSOLE_TOKEN)) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    next();
+  });
+  console.log('[manager] FLEET_CONSOLE_TOKEN が設定されているため、/api への全アクセスにトークンを要求します。');
+}
 
 app.use(express.json({ limit: '256kb' }));
 

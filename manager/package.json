@@ -6,7 +6,8 @@
   "description": "Claude Code コンテナ群の稼働状況可視化・操作ダッシュボード",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "dockerode": "^4.0.7",

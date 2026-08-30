@@ -55,13 +55,56 @@ function characterFor(name) {
 
 /* ------------------------------ helpers ------------------------------ */
 
+// manager が任意で有効化できる共有トークン認証（FLEET_CONSOLE_TOKEN）用。
+// 未設定（既定）のときはこのヘッダは付くが manager 側で無視されるだけなので、
+// 通常運用には影響しない。
+const TOKEN_STORAGE_KEY = 'fleetConsoleToken';
+
+function getStoredToken() {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+  } catch {
+    return ''; // localStorage が使えない環境（プライベートブラウズ等）でも致命的にしない。
+  }
+}
+
+function setStoredToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // 保存できなくても、このリクエスト自体は続行できる。
+  }
+}
+
+// EventSource 用。カスタムヘッダを付けられないため、トークンをクエリ文字列で渡す。
+function tokenQueryParam() {
+  const token = getStoredToken();
+  return token ? `?token=${encodeURIComponent(token)}` : '';
+}
+
 // manager 側の CSRF 対策（単純な <form> POST では付けられないヘッダを必須化）に
 // 合わせて、すべてのリクエストにこのヘッダを付ける。値そのものに意味はない
 // （秘密情報ではない）が、cross-origin の fetch は非単純リクエスト扱いになり
 // CORS プリフライトでブロックされる、というのが実際の防御になる。
-async function apiCall(base, path, options = {}) {
-  const headers = { ...(options.headers ?? {}), 'X-Fleet-Console': '1' };
+async function apiCall(base, path, options = {}, retried = false) {
+  const token = getStoredToken();
+  const headers = {
+    ...(options.headers ?? {}),
+    'X-Fleet-Console': '1',
+    ...(token ? { 'X-Fleet-Token': token } : {}),
+  };
   const res = await fetch(`${base}${path}`, { ...options, headers });
+
+  // FLEET_CONSOLE_TOKEN が設定されている manager からのみ返る。未設定なら発生しない。
+  if (res.status === 401 && !retried) {
+    const input = window.prompt('manager がアクセストークンを要求しています（FLEET_CONSOLE_TOKEN）。入力してください:');
+    if (input) {
+      setStoredToken(input);
+      return apiCall(base, path, options, true);
+    }
+  }
+
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
@@ -445,7 +488,7 @@ function openStream(name) {
   card.els.streamStatus.textContent = '接続中…';
   resetAnswer(card);
 
-  const es = new EventSource(`/api/containers/${encodeURIComponent(name)}/task/stream`);
+  const es = new EventSource(`/api/containers/${encodeURIComponent(name)}/task/stream${tokenQueryParam()}`);
   streams.set(name, es);
 
   // サーバは接続のたびに全イベントを再生する。EventSource は切断時に自動再接続

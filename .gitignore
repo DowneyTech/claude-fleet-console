@@ -1,2 +1,13 @@
 .DS_Store
 **/.DS_Store
+/.env
+**/node_modules
+# パイプラインのチケットは 1 件 1 ファイル（manager/tickets/<id>.json）で
+# 実行時に増減する。workspaces/ と同様に .gitkeep だけ追跡し、中身は追跡しない。
+/manager/tickets/*.json
+/manager/pipeline.json.migrated
+# 使用量集計。ファイルが無ければ空から始まるようコード側で対応済みなので、
+# 空の seed を追跡する必要が無い（追跡すると、実際に使うたびに git 上で
+# 「変更あり」になり続けてしまう）。
+/manager/usage.json
+

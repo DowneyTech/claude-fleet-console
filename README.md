@@ -20,6 +20,7 @@ Claude Code CLI を役割ごとに独立した Docker コンテナ上で実行�
 - [新しいプロジェクトを追加する](#新しいプロジェクトを追加する)
 - [設定の永続化](#設定の永続化)
 - [API 一覧](#api-一覧)
+- [開発](#開発)
 
 ## 構成
 
@@ -59,16 +60,23 @@ manager は各コンテナへ **`docker exec` 経由でのみ** アクセスし�
 - **マスターの判断の質は LLM 任せ** — プロンプトや SKILL.md で厳格化してはいるが、判断の正確さ・一貫性を完全には保証できない。成果物を精査せず楽観的に ADVANCE してしまう、あるいは逆に必要以上に HOLD/REJECT を連発する可能性がある。
 - **`/handoff` が全チケット共有** — 書き込み可能な共有フォルダのため、あるチケットの成果物に紛れ込んだ内容（プロンプトインジェクション）が、理屈の上では別チケットの判断ファイルに影響しうる余地が残っている。
 - **役割は1つにつき1コンテナが前提** — 同じ工程を複数コンテナへ並列に処理させる、といった水平スケールはできない。特定の役割が busy な間、その工程を待つチケットは詰まる。
-- **チケット状態は単一ファイル・単一ロック** — `pipeline.json` 1ファイルに全チケットをまとめて保持し、変更操作は全チケット共通の1本のロックで直列化している。個人・小規模利用を前提とした設計で、大量のチケットを同時に高速処理する用途には向かない。
-- **manager のメモリ・ローカルファイルに依存** — 使用量集計はメモリ上のみ（manager コンテナ再作成でリセット）、チケット等の状態は JSON ファイル保存であり、DB のような堅牢性・スケーラビリティは無い。
+- **チケット状態はローカルの JSON ファイル群** — チケットは `manager/tickets/<チケットID>.json` として1件1ファイルで保持し、変更操作もチケットIDごとに直列化している（無関係な他チケットの操作を待たない）。ただし DB ではないため、個人・小規模利用を前提とした設計であることに変わりはない。
+- **manager はローカルファイルに依存する** — 使用量集計・チケット等の状態はいずれも JSON ファイル保存（manager コンテナを再作成しても消えない）だが、DB のような堅牢性・スケーラビリティは無い。
 - **工程の構成が固定** — 設計 → 実装 → レビュー → テストの4工程＋マスターという構成はコード（`pipelineStore.js`）に直書きされており、UI から工程を増減・並び替えすることはできない。
 
 ## クイックスタート
 
 ```bash
+cp .env.example .env
+# .env を開いて HOST_PROJECT_DIR をこのリポジトリの絶対パスに書き換える
 docker compose build
 docker compose up -d
 ```
+
+`HOST_PROJECT_DIR` は各コンテナへの `/workspace` マウントや、manager が設定UI経由で
+`docker compose` を再実行する際に使う変数。相対パスや `${PWD}` では解決できない箇所が
+あるため（詳細は `docker-compose.yml` のコメント参照）、`.env` で1箇所だけ絶対パスを
+指定する運用にしている。
 
 各 Claude コンテナは `command: ["tail", "-f", "/dev/null"]` で常駐します。manager が `docker exec` で操作するには、コンテナが起動したままである必要があるためです。
 
@@ -281,6 +289,7 @@ docker compose exec claude-project-design claude auth login
 
 - **`docker.sock` はホストの root 相当の権限です。** manager コンテナはホストの Docker を自由に操作できます。ポートは `127.0.0.1:4590` に限定して公開しており、これを `0.0.0.0` に変更してはいけません。
 - **DNS リバインディング対策と CSRF 対策の両方を入れています。** `Host` ヘッダがループバック以外のリクエストは拒否し、さらに状態変更系リクエスト（GET 以外）には専用ヘッダと `Sec-Fetch-Site` の検証を必須にしています。単純な `<form>` からの偽装 POST や、別オリジンの Web ページからの `fetch` 偽装リクエストはブロックされます。とはいえ本物の認証ではないため、**信頼できないネットワークやマルチユーザー環境で 127.0.0.1 以外に公開することは想定していません**。
+- **任意で共有トークン認証を追加できます。** `docker-compose.yml` の manager サービスに `FLEET_CONSOLE_TOKEN` を設定すると、`/api` への全アクセスにこのトークン（`X-Fleet-Token` ヘッダ、または SSE 接続では `?token=` クエリ）を要求するようになります（既定は無効）。SSH トンネル越しなど 127.0.0.1 以外の経路から manager に到達しうる運用をする場合の追加の保険として使ってください。ブラウザ側はトークンを要求されると入力ダイアログを出し、`localStorage` に保存します。
 - **実装工程は既定で `bypassPermissions` です。** UI やパイプラインからプロンプトが投げられた瞬間、確認なしにコンテナ内でコマンド実行・ファイル編集が行われます。コンテナが唯一の隔離境界です。ツールを制限したい場合は `manager/containers.config.json` の各エントリに `allowedTools` を指定してください。
 
   ```json
@@ -299,7 +308,7 @@ docker compose exec claude-project-design claude auth login
 
 ## 設定の永続化
 
-各プロジェクトの Claude Code 設定・認証状態は名前付きボリューム（例: `claude-project-design-config`）に、パイプラインのチケット・テンプレート・自動運転の一時停止状態は `manager/` 配下の JSON ファイル（`pipeline.json`, `templates.json`, `autopilot.json`）に保存されます。設定をリセットしたい場合はボリュームを削除してください。
+各プロジェクトの Claude Code 設定・認証状態は名前付きボリューム（例: `claude-project-design-config`）に、パイプラインのチケット・テンプレート・自動運転の一時停止状態・使用量集計は `manager/` 配下の JSON ファイル（チケットは `tickets/<チケットID>.json` として1件1ファイル、他は `templates.json`, `autopilot.json`, `usage.json`）に保存されます。設定をリセットしたい場合はボリュームを削除してください。
 
 ```bash
 docker compose down
@@ -355,3 +364,25 @@ docker compose up -d
 | POST | `/api/pipeline/tickets/:id/advance` | 次の工程へ進める |
 | POST | `/api/pipeline/tickets/:id/reject` | 手前の工程へ差し戻す（`{ toStage, note }`） |
 | GET | `/api/pipeline/tickets/:id/artifacts` \| `/artifacts/:filename` | 成果物（`/handoff`）の一覧・内容取得 |
+
+## 開発
+
+manager 本体のテスト（Node 標準の `node:test`。Docker 不要、ロジック単体のテストのみ）。
+
+```bash
+cd manager
+npm install
+npm test
+```
+
+`docker-compose.yml` の構文チェックのみ行いたい場合（コンテナは起動しない）:
+
+```bash
+docker compose config -q
+```
+
+GitHub Actions（`.github/workflows/ci.yml`）が push / PR ごとに両方を自動実行します。
+
+## License
+
+[MIT](./LICENSE)

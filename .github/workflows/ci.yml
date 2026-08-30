@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  manager-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: manager
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm test
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # docker-compose.yml は ${HOST_PROJECT_DIR} を参照するため、構文検証用に
+      # 適当な値を .env として与える（実際にコンテナを起動するわけではない）。
+      - run: echo "HOST_PROJECT_DIR=/tmp/fake-project-dir" > .env
+      - run: docker compose config -q

@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * 使用量（コスト・トークン）とレート上限を集計・保持する。
@@ -16,8 +19,9 @@ import { EventEmitter } from 'node:events';
  *    （上限に近い窓しか通知されない）に頼っていた旧実装と違い、この API は
  *    ログインさえしていれば実行中のタスクが無くても常に最新の利用率が取れる。
  *
- * 保持はメモリのみ。manager コンテナを再作成すると累計・上限ともリセットされる。
- * コスト集計は意図的な仕様（UI 側で「manager 起動以降の累計」と明示）。
+ * コスト・トークン集計（totals / ticketTotals）は他の *Store.js と同じ考え方で
+ * JSON ファイルへ永続化し、manager コンテナを再作成しても消えないようにしている
+ * （レート上限は Anthropic 側が持つ状態を都度取り直すだけなので永続化しない）。
  * 恒久的な請求額は Anthropic のコンソールが唯一の正となる。
  *
  * `onUsageChange` で購読者に変更を即座に通知し、ヘッダーは 5 秒ポーリングを
@@ -25,10 +29,63 @@ import { EventEmitter } from 'node:events';
  * `/usage/stream` 参照）。
  */
 
-const totals = new Map(); // コンテナ名 → 累計
-const ticketTotals = new Map(); // パイプラインのチケット ID → 累計（コンテナ横断で合算）
-const rateLimits = new Map(); // コンテナ名 → { five_hour, seven_day, ... }
-const startedAt = Date.now();
+const here = path.dirname(fileURLToPath(import.meta.url));
+const appRoot = path.resolve(here, '..');
+const mountedDir = path.join(process.env.COMPOSE_PROJECT_DIR ?? '/compose-project', 'manager');
+
+export const usagePath = process.env.USAGE_FILE
+  ? path.resolve(process.env.USAGE_FILE)
+  : existsSync(mountedDir)
+    ? path.join(mountedDir, 'usage.json')
+    : path.join(appRoot, 'usage.json');
+
+function loadPersisted() {
+  if (!existsSync(usagePath)) return { totals: {}, ticketTotals: {}, startedAt: Date.now() };
+  try {
+    const data = JSON.parse(readFileSync(usagePath, 'utf8'));
+    return {
+      totals: data?.totals && typeof data.totals === 'object' ? data.totals : {},
+      ticketTotals: data?.ticketTotals && typeof data.ticketTotals === 'object' ? data.ticketTotals : {},
+      // 記録が始まった最初の時刻。UI の「累計」表示の起点として使うため、
+      // 再起動のたびに動かしてはいけない（動かすと「since」の意味が壊れる）。
+      startedAt: Number.isFinite(data?.startedAt) ? data.startedAt : Date.now(),
+    };
+  } catch {
+    // 書き込み途中などで壊れた状態を一瞬読んでしまった場合は、集計を失うより
+    // 空から始める方が安全（次の recordResult で改めて書き直る）。
+    return { totals: {}, ticketTotals: {}, startedAt: Date.now() };
+  }
+}
+
+/** 永続化ファイルの値をそのまま信用せず、欠けたフィールドは既定値で補う。 */
+function sanitizeTotal(raw) {
+  return { ...emptyTotals(), ...(raw && typeof raw === 'object' ? raw : {}) };
+}
+
+const persisted = loadPersisted();
+const totals = new Map(Object.entries(persisted.totals).map(([k, v]) => [k, sanitizeTotal(v)])); // コンテナ名 → 累計
+const ticketTotals = new Map(
+  Object.entries(persisted.ticketTotals).map(([k, v]) => [k, sanitizeTotal(v)]),
+); // チケット ID → 累計（コンテナ横断で合算）
+const rateLimits = new Map(); // コンテナ名 → { five_hour, seven_day, ... }（永続化しない）
+let startedAt = persisted.startedAt;
+
+/**
+ * totals / ticketTotals をディスクへ書き戻す。呼び出し頻度はタスク完了時のみ
+ * （高々分に数回程度）なので、都度同期書き込みで十分。
+ */
+function persist() {
+  const data = {
+    totals: Object.fromEntries(totals),
+    ticketTotals: Object.fromEntries(ticketTotals),
+    startedAt,
+  };
+  try {
+    writeFileSync(usagePath, `${JSON.stringify(data, null, 2)}\n`);
+  } catch (err) {
+    console.error(`[usageStore] 使用量の永続化に失敗しました: ${err.message}`);
+  }
+}
 
 const bus = new EventEmitter();
 bus.setMaxListeners(0); // SSE クライアント数ぶん購読されるため上限を外す。
@@ -136,6 +193,7 @@ export function recordResult(name, result) {
   total.tasks += 1;
   total.lastAt = Date.now();
   totals.set(name, total);
+  persist();
   notify();
 
   return usage;
@@ -163,6 +221,7 @@ export function recordTicketUsage(ticketId, usage) {
   total.tasks += 1;
   total.lastAt = Date.now();
   ticketTotals.set(ticketId, total);
+  persist();
 }
 
 export function usageForTicket(ticketId) {
@@ -187,11 +246,18 @@ export function fleetUsage() {
 }
 
 /**
- * name を省略すると全コンテナ分を消す。
+ * name を省略すると全コンテナ分を消す。全消去のときだけ「since」の起点
+ * （startedAt）も今に更新する（個別コンテナだけの消去で、他コンテナも参照する
+ * 共通の起点を動かしてしまうと、他コンテナの「since」表示がおかしくなるため）。
  * レート上限はこちらが数えている値ではなく Anthropic 側の状態なので消さない。
  */
 export function resetUsage(name) {
-  if (name) totals.delete(name);
-  else totals.clear();
+  if (name) {
+    totals.delete(name);
+  } else {
+    totals.clear();
+    startedAt = Date.now();
+  }
+  persist();
   notify();
 }
